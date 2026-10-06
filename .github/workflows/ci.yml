@@ -1,0 +1,251 @@
+# CI for Memes Arcade.
+#
+# The project is zero-dependency on purpose, so this workflow installs nothing
+# but Node itself: no npm install, no browser downloads, no extra system
+# packages.  Node is pinned to an exact version (see any Node step) to match
+# render.yaml and local dev, so the tested runtime cannot drift with the runner
+# image; its built-in WebSocket is what the realtime, browser and bot harnesses
+# use.  Chromium comes from the image when it ships one - when it is absent the
+# browser suite reports a skip and exits 0 on its own (there is no fallback
+# install to paper over it).  The engine harness is pure Node, the Discord bot
+# check boots its own scratch arcade plus a fake Discord (REST + gateway) on
+# local sockets, and the desktop check loads the Electron main process under a
+# stub electron - so none of them needs a token, an Electron download or any
+# external service.
+#
+# The suites run as separate jobs so the slow ones stop serialising behind the
+# rest: the browser job (Chromium) and the realtime job (two passes over the
+# realtime harness) run beside the quick static, smoke, permission, bot and
+# desktop jobs
+# instead of one after another.  The jobs are independent - a failure in one
+# never hides another's result.  Each repeats the three-step prologue because
+# separate jobs run on separate runners; that is cheaper to read than reaching
+# for a reusable workflow at this size.
+#
+# On a manual run (workflow_dispatch) an optional target URL can be supplied:
+# the smoke, realtime and browser jobs then validate that deployed build
+# instead of their scratch servers (the static, engine, bot, desktop and stress
+# checks stay local either way). A target receives test data (accounts,
+# parties, rooms), so point it at staging. The owner-dependent checks in the
+# smoke and browser suites sign in as that target's owner when the
+# MEMES_ADMIN_PASS (and, if renamed, MEMES_ADMIN_USER) repository secrets are
+# set - otherwise they skip with a note, exactly as in a local run.  staging.yml
+# is the scheduled half of this: the same three suites against vars.STAGING_URL
+# every six hours, so the deployed build is checked without a dispatch.
+name: CI
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Deployed build URL for the smoke, realtime and browser suites (blank = scratch servers)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fastest signal first, and no scratch servers: syntax/engines only.
+  static:
+    name: Static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Node
+        # Pinned to match render.yaml's NODE_VERSION and local dev, so the
+        # suites never run on whatever Node the runner image happens to ship.
+        # package-manager-cache is off: there is nothing to install and no
+        # lockfile for the cache key.
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.16.0
+          package-manager-cache: false
+      - name: Runtime
+        run: |
+          node --version
+          node -e 'if (typeof WebSocket !== "function") { console.error("CI needs Node 22+ for the built-in WebSocket; the pinned Node is set up above."); process.exit(1); }'
+      - name: Static checks
+        run: npm run check
+      - name: Engine tests
+        run: npm test
+      - name: Idea-notify rules
+        run: npm run notifycheck
+      - name: Render blueprint
+        # Proves render.yaml still asks only for free resources, and that every
+        # command, health path and environment variable in it matches the code.
+        run: npm run blueprintcheck
+      - name: No stray state
+        # Fails if a suite left a scratch server, port or data dir behind.
+        if: always()
+        run: npm run leakcheck
+
+  smoke:
+    name: Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      MEMES_TARGET: ${{ inputs.target }}
+      MEMES_ADMIN_PASS: ${{ secrets.MEMES_ADMIN_PASS }}
+      MEMES_ADMIN_USER: ${{ secrets.MEMES_ADMIN_USER }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Node
+        # Kept in lockstep with every other job and render.yaml's NODE_VERSION.
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.16.0
+          package-manager-cache: false
+      - name: Runtime
+        run: |
+          node --version
+          node -e 'if (typeof WebSocket !== "function") { console.error("CI needs Node 22+ for the built-in WebSocket; the pinned Node is set up above."); process.exit(1); }'
+      - name: Smoke
+        run: npm run smoke
+      - name: No stray state
+        # Fails if a suite left a scratch server, port or data dir behind.
+        if: always()
+        run: npm run leakcheck
+
+  perm:
+    name: Permission matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Node
+        # Kept in lockstep with every other job and render.yaml's NODE_VERSION.
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.16.0
+          package-manager-cache: false
+      - name: Runtime
+        run: |
+          node --version
+          node -e 'if (typeof WebSocket !== "function") { console.error("CI needs Node 22+ for the built-in WebSocket; the pinned Node is set up above."); process.exit(1); }'
+      - name: Permission matrix
+        # Scratch-only: it seeds its own owner, promotes a moderator and walks
+        # every staff-gated route, asserting the exact status each role is owed
+        # so a guard dropped to the wrong level fails the build.
+        run: npm run permcheck
+      - name: No stray state
+        # Fails if a suite left a scratch server, port or data dir behind.
+        if: always()
+        run: npm run leakcheck
+
+  realtime:
+    name: Realtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Node
+        # Kept in lockstep with every other job and render.yaml's NODE_VERSION.
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.16.0
+          package-manager-cache: false
+      - name: Runtime
+        run: |
+          node --version
+          node -e 'if (typeof WebSocket !== "function") { console.error("CI needs Node 22+ for the built-in WebSocket; the pinned Node is set up above."); process.exit(1); }'
+      - name: Realtime
+        # The realtime suite measures the target's own party grace window, so
+        # no timing configuration is needed for a deployed build.
+        env:
+          MEMES_TARGET: ${{ inputs.target }}
+        run: npm run realtime
+      - name: Realtime stress
+        # The stress pass boots its own scratch server and wipes its data dir
+        # first, so it deliberately ignores a dispatch target - which is why it
+        # must not inherit MEMES_TARGET (a target would run the stalls against
+        # the deployed build instead). It is a local load/race check, like the
+        # bot step; a failing cycle prints the exact --seed/--stalls replay
+        # command above its FAIL lines.
+        run: npm run stress
+      - name: No stray state
+        # Fails if a suite left a scratch server, port or data dir behind.
+        if: always()
+        run: npm run leakcheck
+
+  browser:
+    name: Browser
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      MEMES_TARGET: ${{ inputs.target }}
+      MEMES_ADMIN_PASS: ${{ secrets.MEMES_ADMIN_PASS }}
+      MEMES_ADMIN_USER: ${{ secrets.MEMES_ADMIN_USER }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Node
+        # Kept in lockstep with every other job and render.yaml's NODE_VERSION.
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.16.0
+          package-manager-cache: false
+      - name: Runtime
+        run: |
+          node --version
+          node -e 'if (typeof WebSocket !== "function") { console.error("CI needs Node 22+ for the built-in WebSocket; the pinned Node is set up above."); process.exit(1); }'
+      - name: Browser
+        run: npm run browser
+      - name: No stray state
+        # Fails if a suite left a scratch server, port or data dir behind.
+        if: always()
+        run: npm run leakcheck
+
+  bot:
+    name: Discord bot
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Node
+        # Kept in lockstep with every other job and render.yaml's NODE_VERSION.
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.16.0
+          package-manager-cache: false
+      - name: Runtime
+        run: |
+          node --version
+          node -e 'if (typeof WebSocket !== "function") { console.error("CI needs Node 22+ for the built-in WebSocket; the pinned Node is set up above."); process.exit(1); }'
+      - name: Discord bot
+        run: npm run botcheck
+      - name: No stray state
+        # Fails if a suite left a scratch server, port or data dir behind.
+        if: always()
+        run: npm run leakcheck
+
+  desktop:
+    name: Desktop client
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Node
+        # Kept in lockstep with every other job and render.yaml's NODE_VERSION.
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.16.0
+          package-manager-cache: false
+      - name: Runtime
+        run: |
+          node --version
+          node -e 'if (typeof WebSocket !== "function") { console.error("CI needs Node 22+ for the built-in WebSocket; the pinned Node is set up above."); process.exit(1); }'
+      - name: Desktop client
+        # The Electron shell only runs inside Electron, which this zero-install
+        # workflow never fetches: the suite loads desktop/main.js under a stub
+        # electron and boots the bundled server on a scratch port for real.
+        run: npm run desktopcheck
+      - name: No stray state
+        # Fails if a suite left a scratch server, port or data dir behind.
+        if: always()
+        run: npm run leakcheck

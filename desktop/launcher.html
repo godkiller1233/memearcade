@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; img-src data:;" />
+  <title>Memes Arcade</title>
+  <style>
+    :root { color-scheme: dark; --accent: #ff2fb0; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 32px;
+      font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: radial-gradient(1100px 640px at 18% -12%, #3a1050, #120c1e 62%);
+      color: #f3edff;
+    }
+    .card {
+      width: 100%; max-width: 620px; background: rgba(20, 14, 34, .84);
+      border: 1px solid rgba(255, 255, 255, .1); border-radius: 18px;
+      padding: 26px 28px 22px; box-shadow: 0 24px 60px rgba(0, 0, 0, .5);
+    }
+    .logo { font-weight: 800; letter-spacing: .14em; font-size: 21px; margin: 0 0 2px; }
+    .logo span { color: var(--accent); }
+    .sub { color: #b9aed2; font-size: 13px; margin: 0 0 18px; }
+    .modes { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+    .mode {
+      text-align: left; cursor: pointer; padding: 14px 15px; border-radius: 14px; color: inherit;
+      background: rgba(255, 255, 255, .045); border: 1px solid rgba(255, 255, 255, .14);
+      transition: border-color .15s, transform .15s;
+    }
+    .mode:hover:not(:disabled) { border-color: var(--accent); transform: translateY(-1px); }
+    .mode:disabled { opacity: .45; cursor: not-allowed; }
+    .mode b { display: block; font-size: 14px; margin-bottom: 3px; }
+    .mode small { color: #b9aed2; font-size: 12px; line-height: 1.4; display: block; }
+    label { display: block; font-size: 12px; color: #b9aed2; margin: 0 0 6px; }
+    input {
+      width: 100%; padding: 11px 13px; border-radius: 11px; font-size: 14px;
+      background: #0e0a18; color: #f3edff; border: 1px solid rgba(255, 255, 255, .16);
+    }
+    input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .row { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
+    button.primary {
+      background: var(--accent); border: 0; color: #1a0b1a; font-weight: 700;
+      padding: 11px 20px; border-radius: 11px; cursor: pointer; font-size: 14px;
+    }
+    button.ghost {
+      background: transparent; color: #d9cff2; border: 1px solid rgba(255, 255, 255, .2);
+      padding: 11px 16px; border-radius: 11px; cursor: pointer; font-size: 13px;
+    }
+    button:disabled { opacity: .5; cursor: progress; }
+    .status { margin-top: 14px; font-size: 13px; color: #cbbff0; min-height: 20px; }
+    .foot { margin-top: 18px; padding-top: 14px; border-top: 1px solid rgba(255, 255, 255, .08); color: #8d82a8; font-size: 12px; }
+    .foot a { color: #cbbff0; }
+    code { background: rgba(255, 255, 255, .08); padding: 1px 5px; border-radius: 5px; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1 class="logo">MEMES<span>ARCADE</span></h1>
+    <p class="sub" id="edition">Desktop</p>
+
+    <div class="modes">
+      <button class="mode" id="mode-host" type="button">
+        <b>🏠 Host (this computer)</b>
+        <small>Starts the bundled server. Games, matches and music work offline and on your wifi.</small>
+      </button>
+      <button class="mode" id="mode-lite" type="button">
+        <b>🌐 Connect to a website</b>
+        <small>Use the online arcade - the same account, friends and rooms everywhere.</small>
+      </button>
+    </div>
+
+    <label for="server">Arcade address</label>
+    <input id="server" type="url" placeholder="https://your-arcade.onrender.com" spellcheck="false" />
+    <div class="row">
+      <button class="primary" id="connect" type="button">Connect</button>
+      <button class="ghost" id="stop" type="button" hidden>Stop local server</button>
+      <button class="ghost" id="folder" type="button">Open my saves</button>
+    </div>
+
+    <div class="status" id="status"></div>
+
+    <p class="foot" id="foot"></p>
+  </main>
+  <script src="launcher.js"></script>
+</body>
+</html>

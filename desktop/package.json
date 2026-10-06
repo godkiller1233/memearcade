@@ -1,0 +1,15 @@
+{
+  "name": "memes-arcade-desktop",
+  "productName": "Memes Arcade Desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Memes Arcade desktop shell - Lite (the website in a window) and Host (runs the bundled arcade offline).",
+  "main": "main.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^31.0.0"
+  }
+}

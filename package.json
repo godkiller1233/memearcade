@@ -1,0 +1,38 @@
+{
+  "name": "memes-arcade",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Memes Arcade - one platform, sixty games. Website + Discord bot + desktop client with cross-version compatibility.",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "check": "node tools/check.mjs",
+    "blueprintcheck": "node tools/blueprint-check.mjs",
+    "test": "node tools/test-engines.mjs",
+    "notifycheck": "node tools/notify-check.mjs",
+    "smoke": "node tools/smoke.mjs",
+    "realtime": "node tools/realtime-check.mjs",
+    "stress": "node tools/realtime-check.mjs --stress",
+    "stress:corpus": "node tools/stress-corpus.mjs",
+    "browser": "node tools/browser-reload-check.mjs",
+    "botcheck": "node tools/bot-check.mjs",
+    "desktopcheck": "node tools/desktop-check.mjs",
+    "permcheck": "node tools/perm-check.mjs",
+    "leakcheck": "node tools/leak-check.mjs",
+    "bot": "node bot/index.js",
+    "desktop": "node desktop/main.js",
+    "verify": "node tools/check.mjs && node tools/blueprint-check.mjs && node tools/notify-check.mjs && node tools/test-engines.mjs && node tools/realtime-check.mjs && node tools/browser-reload-check.mjs && node tools/bot-check.mjs && node tools/desktop-check.mjs && node tools/perm-check.mjs && node tools/leak-check.mjs"
+  },
+  "dependencies": {},
+  "keywords": [
+    "games",
+    "party-games",
+    "discord-bot",
+    "electron"
+  ],
+  "license": "MIT"
+}

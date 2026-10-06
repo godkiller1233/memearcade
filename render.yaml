@@ -1,0 +1,60 @@
+# Memes Arcade - Render Blueprint (Infrastructure as Code)
+#
+# Everything in this file runs on Render's Free compute plan: one Node web
+# service. No disk, no background worker, no database, no second instance.
+# What "free" means here:
+#   - 0.1 CPU / 512 MB, and the service spins down after 15 minutes with no
+#     inbound traffic (the next visit waits ~1 minute for it to wake)
+#   - the filesystem is ephemeral: data/ is rebuilt on every deploy, restart
+#     *and* spin-down, so accounts reset - keep MEMES_ADMIN_PASS set
+#   - 750 free instance hours per workspace per month: one always-awake
+#     service fits (~730 h), a second one would trip the cap
+#   - WebSockets, custom domains and managed TLS are included
+#   - persistent disks and background workers are not (see docs/DEPLOY.md for
+#     the paid upgrade snippets)
+#
+# Deploy: push this repo to GitHub, then in Render choose
+#   New -> Blueprint -> pick the repo -> Apply.
+# Render reads this file and prompts for the values marked `sync: false`.
+# Spec: https://render.com/docs/blueprint-spec
+# `npm run blueprintcheck` proves this file only ever asks for free resources.
+services:
+  - type: web
+    name: memes-arcade
+    runtime: node
+    plan: free
+    autoDeployTrigger: commit
+    # No `npm install`: the project has no dependencies. The build runs the
+    # project's own checks, so a broken engine - or a blueprint edit that starts
+    # asking for something paid - fails the deploy instead of the players.
+    buildCommand: npm run check && npm run blueprintcheck
+    startCommand: npm start
+    healthCheckPath: /api/health
+    # The server closes its store on SIGTERM, so give it room to finish.
+    maxShutdownDelaySeconds: 30
+    # No `region:` - Render uses your workspace's default. Add
+    # `region: frankfurt` (or ohio / virginia / singapore) before the first
+    # deploy if you want it closer to your players: the value is permanent.
+    # No `numInstances:` - a free instance can't scale, and rooms, parties and
+    # matches live in this process's memory, so exactly one is what the app wants.
+    envVars:
+      # Render injects PORT, NODE_ENV=production and RENDER_EXTERNAL_URL, so
+      # invite links already point at the right host - none of those go here.
+      - key: NODE_VERSION
+        value: 24.16.0
+      # Your owner account. Render asks for the password during the Blueprint
+      # flow and it is never stored in this file. Set it even if you are just
+      # trying things out: a free service spins down, and on the next wake the
+      # generated password in data/ADMIN-CREDENTIALS.txt is gone with it.
+      - key: MEMES_ADMIN_PASS
+        sync: false
+      - key: MEMES_ADMIN_USER
+        value: memegodmidas
+      # Keeps the Discord bot's shared secret stable across redeploys, because
+      # data/bot-secret.txt is wiped. Run the bot on your own PC against this
+      # service's public URL - see docs/DEPLOY.md ("Running the Discord bot").
+      - key: MEMES_BOT_SECRET
+        generateValue: true
+      # Close registrations once your friends have signed up:
+      # - key: MEMES_REGISTRATIONS
+      #   value: closed

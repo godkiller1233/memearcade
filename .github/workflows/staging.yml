@@ -1,0 +1,106 @@
+# Scheduled validation of the deployed staging build.
+#
+# The push CI (ci.yml) tests scratch servers, and its manual dispatch can point
+# the smoke, realtime and browser suites at a deployed build by hand.  This
+# workflow is the automatic half of that: on a schedule it validates whatever
+# URL sits in the STAGING_URL repository variable, so drift on the deployed
+# build shows up without anyone remembering to dispatch a run.
+#
+# STAGING_URL is a *variable* (Settings -> Secrets and variables -> Actions ->
+# Variables), not a secret - a URL is not sensitive, and a variable keeps it
+# visible in the log when a run names the build it checked.  Set it to the
+# staging URL; leave it unset and the scheduled run warns and skips the suites
+# rather than quietly testing scratch servers instead (the suites read an empty
+# MEMES_TARGET as "no target").
+#
+# The suites create test data on the target - accounts, parties, rooms - so
+# point the variable at staging, never production.  For the same reason the
+# concurrency group below queues instead of cancelling: a run in flight is
+# part-way through writing that data, and two overlapping runs would collide.
+#
+# Like ci.yml this installs nothing but Node itself, pinned to the same exact
+# version so staging is exercised on the runtime that ships.  The owner-only
+# checks sign in as the target's owner when the MEMES_ADMIN_PASS (and, if the
+# owner was renamed, MEMES_ADMIN_USER) repository secrets are set - otherwise
+# they skip with a note, exactly as in a local run.
+name: Staging
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # every six hours
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staging
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve the target
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      url: ${{ steps.variable.outputs.url }}
+    steps:
+      - name: Read STAGING_URL
+        id: variable
+        env:
+          STAGING_URL: ${{ vars.STAGING_URL }}
+        run: |
+          set -eu
+          # Trim whitespace and any trailing slash; the suites normalize too,
+          # but a clean value here is what the log and the skip check use.
+          url="$(printf '%s' "${STAGING_URL:-}" | tr -d '[:space:]')"
+          url="${url%/}"
+          if [ -z "$url" ]; then
+            echo "::warning::vars.STAGING_URL is not set, so there is no deployed build to check. Add it under Settings -> Secrets and variables -> Actions -> Variables to switch this run back on."
+            echo "url=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$url" in
+            http://*|https://*) ;;
+            *)
+              echo "::error::vars.STAGING_URL must be an http(s) URL, got '$url'."
+              exit 1
+              ;;
+          esac
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Checking the deployed build at $url"
+
+  suites:
+    name: ${{ matrix.suite }}
+    needs: resolve
+    # An empty target would send every suite to its own scratch server, which is
+    # not what a staging run is for - skip instead, loudly, above.
+    if: needs.resolve.outputs.url != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        # Only the three suites that accept a deployed build.  The static,
+        # engine, bot and desktop checks are local by design, and the stress
+        # corpus deliberately ignores a target, so they stay in ci.yml and the
+        # nightly.
+        suite: [smoke, realtime, browser]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MEMES_TARGET: ${{ needs.resolve.outputs.url }}
+      MEMES_ADMIN_PASS: ${{ secrets.MEMES_ADMIN_PASS }}
+      MEMES_ADMIN_USER: ${{ secrets.MEMES_ADMIN_USER }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Node
+        # Keep this in lockstep with ci.yml and render.yaml's NODE_VERSION.
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.16.0
+          package-manager-cache: false
+      - name: Runtime
+        run: |
+          node --version
+          node -e 'if (typeof WebSocket !== "function") { console.error("CI needs Node 22+ for the built-in WebSocket; the pinned Node is set up above."); process.exit(1); }'
+      - name: ${{ matrix.suite }}
+        run: npm run ${{ matrix.suite }}

@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en" data-theme="arcade-dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Memes Arcade</title>
+  <meta name="description" content="Memes Arcade - one platform, sixty games. Website, Discord bot and desktop client with shared accounts." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🕹️</text></svg>" />
+  <link rel="stylesheet" href="/css/app.css" />
+</head>
+<body>
+  <!-- Boot / compatibility gate ---------------------------------------- -->
+  <div id="boot" class="boot">
+    <div class="boot-card">
+      <div class="logo">MEMES<span>ARCADE</span></div>
+      <div id="boot-status" class="boot-status">Connecting to the arcade...</div>
+      <div id="boot-detail" class="boot-detail"></div>
+      <div id="boot-actions" class="row"></div>
+    </div>
+  </div>
+
+  <!-- Auth -------------------------------------------------------------- -->
+  <div id="auth" class="auth hidden">
+    <div class="auth-card">
+      <div class="logo big">MEMES<span>ARCADE</span></div>
+      <p class="tagline">60-ish games. One account. Website, desktop and Discord.</p>
+      <div class="tabs">
+        <button class="tab on" data-auth-tab="login">Sign in</button>
+        <button class="tab" data-auth-tab="register">Create account</button>
+      </div>
+      <form id="auth-form" autocomplete="on">
+        <label>Username<input id="auth-name" class="input" name="username" required minlength="3" maxlength="20" autocomplete="username" /></label>
+        <label>Password<input id="auth-pass" class="input" name="password" type="password" required minlength="6" autocomplete="current-password" /></label>
+        <div id="auth-error" class="error"></div>
+        <button id="auth-submit" class="btn primary wide" type="submit">Sign in</button>
+      </form>
+      <div class="row spread">
+        <button id="auth-guest" class="btn ghost">Play as guest</button>
+        <button id="auth-theme" class="btn ghost" title="Cycle theme">🎨 Theme</button>
+        <button id="auth-download" class="btn ghost" title="Desktop downloads">⬇ Desktop app</button>
+      </div>
+      <p class="muted small" id="auth-footer"></p>
+    </div>
+  </div>
+
+  <!-- App --------------------------------------------------------------- -->
+  <div id="app" class="app hidden">
+    <header class="topbar">
+      <button id="nav-toggle" class="icon-btn" title="Menu">☰</button>
+      <div class="logo small">MEMES<span>ARCADE</span></div>
+      <nav class="tabs nav">
+        <button class="tab on" data-view="home">Home</button>
+        <button class="tab" data-view="catalog">Games</button>
+        <button class="tab" data-view="lobby">Lobby</button>
+        <button class="tab" data-view="suggestions">💡 Ideas</button>
+        <button class="tab" data-view="changelog">📦 Changelog</button>
+        <button class="tab" data-view="friends">Friends</button>
+        <button class="tab" data-view="chat">Chat</button>
+        <button class="tab" data-view="profile">Profile</button>
+        <button class="tab" data-view="settings">Settings</button>
+        <button class="tab" data-view="download">Download</button>
+        <button class="tab admin-only hidden" data-view="admin">Admin<span id="admin-badge" class="badge hidden"></span></button>
+      </nav>
+      <div class="top-actions">
+        <button id="music-toggle" class="icon-btn" title="Music on/off">🔊</button>
+        <button id="theme-toggle" class="icon-btn" title="Cycle theme">🎨</button>
+        <div id="me-chip" class="me-chip" title="Your profile"></div>
+        <button id="logout" class="icon-btn" title="Sign out">⎋</button>
+      </div>
+    </header>
+
+    <div id="announcement" class="announcement hidden"></div>
+
+    <main class="layout">
+      <aside id="sidebar" class="sidebar">
+        <div class="side-block">
+          <h4>Your party</h4>
+          <div id="side-party" class="side-party"></div>
+        </div>
+        <div class="side-block">
+          <h4>Online now</h4>
+          <div id="side-online" class="side-online"></div>
+        </div>
+        <div class="side-block">
+          <h4>Quick play</h4>
+          <div id="side-quick" class="side-quick"></div>
+        </div>
+      </aside>
+      <section id="view" class="view"></section>
+    </main>
+
+    <footer class="statusbar">
+      <span id="status-connection" class="dot-line">connecting…</span>
+      <span id="status-room" class="dot-line"></span>
+      <span id="status-counts" class="dot-line"></span>
+      <span id="status-version" class="dot-line"></span>
+    </footer>
+  </div>
+
+  <!-- Floating chat + toasts ------------------------------------------- -->
+  <aside id="chat-dock" class="chat-dock hidden">
+    <header>
+      <span id="chat-dock-title">Party chat</span>
+      <div class="row">
+        <button id="chat-dock-scope" class="icon-btn" title="Switch channel">⇄</button>
+        <button id="chat-dock-close" class="icon-btn" title="Close">✕</button>
+      </div>
+    </header>
+    <div id="chat-dock-body" class="chat-dock-body"></div>
+    <div id="chat-dock-input" class="chat-dock-input"></div>
+  </aside>
+  <div id="toasts" class="toasts"></div>
+  <div id="modal" class="modal hidden"><div class="modal-card" id="modal-card"></div></div>
+
+  <script type="module" src="/js/main.js"></script>
+  <noscript><p style="padding:2rem">Memes Arcade needs JavaScript. Everything runs locally - no trackers.</p></noscript>
+</body>
+</html>

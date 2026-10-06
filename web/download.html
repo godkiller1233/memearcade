@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en" data-theme="arcade-dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Download - Memes Arcade</title>
+  <meta name="description" content="Download the Memes Arcade desktop app: Lite (a tiny window around the website) or Host (the whole arcade, playable offline)." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🕹️</text></svg>" />
+  <link rel="stylesheet" href="/css/app.css" />
+  <style>
+    .page { max-width: 1040px; margin: 0 auto; padding: 24px 18px 60px; display: flex; flex-direction: column; gap: var(--gap); }
+    .topline { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .topline .spacer { flex: 1; }
+    .hero { display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
+      background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 24%, var(--surface)), var(--surface)); }
+    .hero .big-icon { font-size: 3rem; line-height: 1; }
+    .hero-body { flex: 1; min-width: 260px; }
+    .steps { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 6px; font-size: 0.88rem; }
+    .steps li::marker { color: var(--accent); font-weight: 700; }
+    .grid.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: var(--gap); }
+    .grid.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: var(--gap); }
+    .pkg { display: flex; flex-direction: column; gap: 9px; }
+    .pkg .icon { font-size: 2rem; }
+    .pkg h2 { margin: 0; }
+    .grid.two { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+    .muted.small { font-size: 0.82rem; }
+    footer { color: var(--text-dim); font-size: 0.82rem; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="topline">
+      <span class="logo">MEMES<span>ARCADE</span></span>
+      <span class="spacer"></span>
+      <a class="btn ghost sm" href="/">← Back to the arcade</a>
+    </div>
+
+    <div class="card hero">
+      <span class="big-icon">⬇️</span>
+      <div class="hero-body">
+        <h1>Download the desktop app</h1>
+        <p class="muted">Play in its own window. Two builds: a tiny one that uses this website, and a full one that hosts every game on your own computer - offline, on your wifi, or online.</p>
+      </div>
+      <div class="row" id="hero-badges"></div>
+    </div>
+
+    <div class="grid cards" id="packages">
+      <div class="card muted">Measuring the packages…</div>
+    </div>
+
+    <div class="grid two">
+      <div class="card">
+        <h3>🪶 Run the Lite build</h3>
+        <ol class="steps" id="steps-lite"></ol>
+        <p class="muted small">No server and no game files - it always plays against the website you downloaded it from.</p>
+      </div>
+      <div class="card">
+        <h3>🏠 Run the Host build</h3>
+        <ol class="steps" id="steps-host"></ol>
+        <p class="muted small">The server itself has <b>zero dependencies</b> - <code>npm start</code> works immediately, no <code>npm install</code> needed.</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Which one do I want?</h3>
+      <table class="admin-table">
+        <thead><tr><th></th><th>🪶 Lite</th><th>🏠 Host</th></tr></thead>
+        <tbody>
+          <tr><td>Download size</td><td>~10 KB + one-time Electron install</td><td>the whole arcade (~400 KB)</td></tr>
+          <tr><td>Internet needed</td><td>yes - it loads this website</td><td>no - runs entirely on your machine</td></tr>
+          <tr><td>Host your own matches</td><td>no</td><td>yes, including LAN parties and offline</td></tr>
+          <tr><td>Use the online arcade</td><td>yes</td><td>yes, from the Server menu</td></tr>
+          <tr><td>Your account &amp; friends</td><td>same everywhere</td><td>same everywhere</td></tr>
+          <tr><td>What you need</td><td>Node.js 18+</td><td>Node.js 18+ (nothing else)</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card" id="desktop-note" hidden>
+      <h3>You are already in the desktop app</h3>
+      <p class="muted">Switch modes any time from the <b>Server</b> menu: <i>Connect to a website…</i> for the online arcade, <i>Start local server</i> for offline play. Your saves live in your user folder, so updating never wipes accounts.</p>
+      <div class="row">
+        <button class="btn sm" id="open-folder">Open my saves folder</button>
+        <button class="btn sm" id="copy-page">Copy this page's link</button>
+      </div>
+    </div>
+
+    <footer id="foot">Everything is MIT licensed and runs locally - no trackers, no telemetry, no account required to try it.</footer>
+  </div>
+
+  <div id="toasts" class="toasts"></div>
+  <script type="module" src="/js/download-page.js"></script>
+</body>
+</html>

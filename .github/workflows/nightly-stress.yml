@@ -1,0 +1,89 @@
+# Nightly realtime stress run.
+#
+# The push CI (ci.yml) drives the realtime flow on a scripted timeline and also
+# runs one seeded --stress pass on every push.  This workflow replays the whole
+# stress corpus - tools/stress-corpus.mjs - as a matrix, one job per entry, so a
+# timing that once went wrong stays covered for good.  A stress schedule is a
+# pure function of (seed, stall count), which is what makes that possible: the
+# same pair always replays the same stall pattern.
+#
+# The matrix is read from the corpus file rather than written out here, so
+# adding an entry there is all it takes to have the nightly start covering it -
+# there is no second list to drift.  fail-fast is off, so a red nightly names
+# every seed that failed instead of only the first one it reached, and the
+# failing job's log prints the exact --seed/--stalls replay command.
+#
+# Like ci.yml it installs nothing but Node itself, pinned to the same exact
+# version as ci.yml (and render.yaml) so the nightly stresses the very runtime
+# that ships; each job boots its own scratch arcade on a spare port and wipes
+# its data dir before the run.  concurrency.cancel-in-progress is off: a nightly
+# run that is already going is never killed, a new schedule just waits its turn.
+name: Nightly stress
+
+on:
+  schedule:
+    - cron: '0 3 * * *' # 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-stress
+  cancel-in-progress: false
+
+jobs:
+  corpus:
+    name: Corpus
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.read.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Node
+        # Keep this in lockstep with ci.yml and render.yaml's NODE_VERSION.
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.16.0
+          package-manager-cache: false
+      - name: Read the corpus
+        id: read
+        # The matrix is JSON, so it goes in through a delimiter rather than a
+        # bare echo - the quotes would end the shell string early.
+        run: |
+          {
+            echo 'matrix<<STRESS_CORPUS'
+            node tools/stress-corpus.mjs --json
+            echo 'STRESS_CORPUS'
+          } >> "$GITHUB_OUTPUT"
+      - name: Check the matrix parses
+        # A malformed matrix fails fromJSON with a confusing error, so prove it
+        # is valid here and print the schedules the run is about to cover.
+        env:
+          MATRIX: ${{ steps.read.outputs.matrix }}
+        run: node -e 'const m = JSON.parse(process.env.MATRIX); console.log(`${m.length} stress schedules:`, m.map((e) => `${e.seed}x${e.stalls}`).join(", "))'
+
+  stress:
+    name: Seed ${{ matrix.entry.seed }} (${{ matrix.entry.stalls }} stalls)
+    needs: corpus
+    strategy:
+      fail-fast: false
+      matrix:
+        entry: ${{ fromJSON(needs.corpus.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Node
+        # Keep this in lockstep with ci.yml and render.yaml's NODE_VERSION.
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.16.0
+          package-manager-cache: false
+      - name: Runtime
+        run: |
+          node --version
+          node -e 'if (typeof WebSocket !== "function") { console.error("CI needs Node 22+ for the built-in WebSocket; the pinned Node is set up above."); process.exit(1); }'
+      - name: Realtime stress
+        run: npm run stress -- --seed ${{ matrix.entry.seed }} --stalls ${{ matrix.entry.stalls }}
