@@ -55,6 +55,12 @@ Two free-tier behaviours decide how the arcade feels:
 - **Its disk is wiped on every deploy, restart and spin-down.** Accounts and
   saves reset. Keep `MEMES_ADMIN_PASS` set so your own account always returns -
   friends can re-register, or you can attach a disk on a paid instance (below).
+- **Some Blueprint fields are refused outright.** `maxShutdownDelaySeconds` is
+  rejected with "max shutdown delay is not supported for free tier services" -
+  the published schema allows the field, so it only fails at apply time and the
+  service never starts. The blueprint therefore leaves it out: SIGTERM still
+  reaches the server and it still closes (and flushes) its store on the way out,
+  within the free tier's own grace window.
 
 Render's own docs say free instances are for hobby projects - which is exactly
 what this is.
@@ -66,9 +72,9 @@ npm run blueprintcheck
 ```
 
 It parses `render.yaml` and proves every service in it is legal on the free plan
-(web service, `plan: free`, no disk, no autoscaling, no database, one instance),
-then checks the build/start commands, the health path and every environment
-variable against the code. It runs in CI *and* inside the Blueprint's own build
+(web service, `plan: free`, no disk, no autoscaling, no database, one instance,
+no field Render refuses on a free instance), then checks the build/start
+commands, the health path and every environment variable against the code. It runs in CI *and* inside the Blueprint's own build
 command, so a change that starts asking for paid resources fails the deploy
 instead of the billing page.
 

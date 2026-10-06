@@ -9,7 +9,8 @@
  * What it proves:
  *   1. every service is legal on Render's Free compute plan - `type: web` with
  *      `plan: free`, no disk, no extra instances, no autoscaling, no paid-only
- *      fields, no databases (only web services get a free instance)
+ *      fields, no field the platform itself refuses on a free instance, no
+ *      databases (only web services get a free instance)
  *   2. the commands Render runs exist in package.json
  *   3. the health check path is one the server really serves
  *   4. every environment variable is one the code actually reads (catches
@@ -134,6 +135,22 @@ const PLATFORM_KEYS = new Set([
 
 /** Fields that need a paid instance type, or that scale past one instance. */
 const PAID_FIELDS = ['disk', 'maintenanceMode', 'ipAllowList', 'scaling', 'previews', 'pullRequestPreviewsEnabled'];
+
+/**
+ * Fields Render's own validator refuses on a free instance even though the
+ * published schema allows them - a schema-valid file can still be rejected at
+ * apply time, which reads as a deploy that never starts:
+ *
+ *   services[0].maxShutdownDelaySeconds
+ *   max shutdown delay is not supported for free tier services
+ *
+ * That is exactly how the graceful-shutdown window this blueprint used to ask
+ * for turned up here: SIGTERM still reaches the server and it still closes its
+ * store on the way out, so only the *request* for a longer grace period goes.
+ */
+const FREE_TIER_REJECTED = new Map([
+  ['maxShutdownDelaySeconds', 'Render refuses it on a free instance ("max shutdown delay is not supported for free tier services")'],
+]);
 const SECRET_NAME = /(PASS|PASSWORD|TOKEN|SECRET|_KEY$|APIKEY)/;
 
 function main() {
@@ -171,6 +188,9 @@ function main() {
     for (const field of PAID_FIELDS) {
       if (service[field] !== undefined) report(false, `${label} has no paid-only field: ${field}`, 'needs a paid instance type');
     }
+    for (const [field, why] of FREE_TIER_REJECTED) {
+      if (service[field] !== undefined) report(false, `${label} has no free-tier-rejected field: ${field}`, why);
+    }
     if (service.numInstances !== undefined && Number(service.numInstances) !== 1) {
       report(false, `${label} stays on one instance`, `numInstances: ${service.numInstances} - free instances can't scale, and rooms/parties live in memory`);
     }
@@ -185,7 +205,8 @@ function main() {
   }
   if (!failures) {
     const plan = services.map((s) => `${s.name}=${s.plan}`).join(', ');
-    report(true, 'the blueprint only asks for free resources', `${plan}; no disk, no extra instances, no paid-only fields`);
+    report(true, 'the blueprint only asks for free resources',
+      `${plan}; no disk, no extra instances, no paid-only fields, none of the ${FREE_TIER_REJECTED.size} field(s) Render refuses on free`);
   }
 
   console.log('\n[3/4] commands, health check and environment');

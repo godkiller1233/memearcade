@@ -30,8 +30,13 @@ services:
     buildCommand: npm run check && npm run blueprintcheck
     startCommand: npm start
     healthCheckPath: /api/health
-    # The server closes its store on SIGTERM, so give it room to finish.
-    maxShutdownDelaySeconds: 30
+    # No `maxShutdownDelaySeconds:` - Render's validator refuses it on a free
+    # instance ("max shutdown delay is not supported for free tier services"),
+    # even though the published schema allows the field, so a Blueprint that
+    # carries it cannot be applied at all. SIGTERM still reaches the server and
+    # it still closes its store - it just gets the free tier's own grace window
+    # instead of one it asked for. On a paid instance, put the line back and
+    # check with `MEMES_BLUEPRINT_PAID=1 npm run blueprintcheck`.
     # No `region:` - Render uses your workspace's default. Add
     # `region: frankfurt` (or ohio / virginia / singapore) before the first
     # deploy if you want it closer to your players: the value is permanent.
