@@ -49,15 +49,35 @@ export const PORT_BANDS = [
   { from: 9411, to: 9450, what: "the bot check's fake Discord" },
 ];
 
+/**
+ * In CI the report also goes where a red run can be read without opening the
+ * raw log: every failure becomes a workflow annotation (the error panel beside
+ * the failed step) and the whole report lands on the run's summary page, so a
+ * leak names itself instead of hiding in a log nobody is signed in to read.
+ * Both are output only - neither changes what the check decides.
+ */
+const IN_ACTIONS = process.env.GITHUB_ACTIONS === 'true';
+const SUMMARY_FILE = process.env.GITHUB_STEP_SUMMARY || '';
+const reportLines = [];
+
+/** Console, plus the report body when a summary file was handed to us. */
+const write = (text = '') => {
+  console.log(text);
+  if (SUMMARY_FILE) reportLines.push(text);
+};
+/** Workflow command escaping, so a `%` or newline in a path cannot break one. */
+const esc = (text) => String(text).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+
 let failures = 0;
 let passed = 0;
 const check = (ok, label, detail = '') => {
   if (ok) passed++;
   else failures++;
-  console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${label}${detail ? ` — ${detail}` : ''}`);
+  write(`  ${ok ? 'ok  ' : 'FAIL'} ${label}${detail ? ` — ${detail}` : ''}`);
+  if (!ok && IN_ACTIONS) console.log(`::error title=stray state::${esc(label)}${detail ? ` — ${esc(detail)}` : ''}`);
   return ok;
 };
-const note = (text) => console.log(`  note  ${text}`);
+const note = (text) => write(`  note  ${text}`);
 /** Keep a report to a line: a leak is often dozens of paths. */
 const list = (items, max = 6) => (items.length <= max ? items.join(', ') : `${items.slice(0, max).join(', ')} (+${items.length - max} more)`);
 
@@ -210,13 +230,13 @@ export function runChecks() {
   const platforms = scratchPlatforms(sources);
   const spans = scratchPortSpans(sources);
 
-  console.log('\n[1/4] the suites still describe what to look for');
+  write('\n[1/4] the suites still describe what to look for');
   check(spans.length > 0 && dataDirs.length > 0, 'the suites were scanned', `${dataDirs.length} data dirs, ${spans.length} port spans`);
   const outside = spans.filter((s) => !PORT_BANDS.some((band) => s.from >= band.from && s.to <= band.to));
   check(outside.length === 0, 'every scratch port stays inside a checked band',
     outside.length ? `${outside.map((s) => `${s.from}-${s.to}`).join(', ')} — widen PORT_BANDS in tools/leak-check.mjs` : `${spans.map((s) => `${s.from}-${s.to}`).join(', ')}`);
 
-  console.log('\n[2/4] no scratch process outlived its suite');
+  write('\n[2/4] no scratch process outlived its suite');
   const processes = scratchProcesses(platforms);
   if (processes === null) {
     note(`command lines are not readable on ${process.platform}, so only the port scan below can spot a leftover process`);
@@ -225,7 +245,7 @@ export function runChecks() {
       processes.length ? list(processes.map((p) => `pid ${p.pid}: ${p.why}`)) : `checked ${platforms.length} platform markers`);
   }
 
-  console.log('\n[3/4] no scratch port is still listening');
+  write('\n[3/4] no scratch port is still listening');
   const open = listeningPorts();
   if (open === null) {
     note('neither ss nor netstat is available here, so the scratch ports could not be scanned');
@@ -235,7 +255,7 @@ export function runChecks() {
       leaked.length ? `still listening: ${list(leaked)}` : `${PORT_BANDS.map((b) => `${b.from}-${b.to}`).join(', ')} clear`);
   }
 
-  console.log('\n[4/4] no scratch data or temp dir was left behind');
+  write('\n[4/4] no scratch data or temp dir was left behind');
   const leftDirs = dataDirs.filter((name) => fs.existsSync(path.join(DATA_ROOT, name)));
   check(leftDirs.length === 0, 'the suites removed their scratch data dirs',
     leftDirs.length ? `still on disk: ${list(leftDirs.map((n) => `data/${n}`))}` : `checked ${dataDirs.map((n) => `data/${n}`).join(', ')}`);
@@ -260,7 +280,18 @@ if (invokedDirectly) {
   } catch (err) {
     failures++;
     console.error(`\nLeak check crashed: ${err.stack || err.message}`);
+    reportLines.push(`Leak check crashed: ${err.message}`);
   }
-  console.log(`\n${failures ? `✗ ${failures} stray-state failure(s), ${passed} passed` : `✓ no stray state: ${passed} checks passed`}\n`);
+  const verdict = failures
+    ? `✗ ${failures} stray-state failure(s), ${passed} passed`
+    : `✓ no stray state: ${passed} checks passed`;
+  write(`\n${verdict}\n`);
+  if (SUMMARY_FILE) {
+    try {
+      fs.appendFileSync(SUMMARY_FILE, ['## Stray state', '', verdict, '', '```', ...reportLines, '```', ''].join('\n'));
+    } catch (err) {
+      console.error(`could not write the step summary: ${err.message}`);
+    }
+  }
   process.exit(failures ? 1 : 0);
 }
