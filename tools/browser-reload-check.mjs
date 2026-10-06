@@ -237,18 +237,6 @@ async function startServer() {
     : `the scratch server never answered /api/health on port ${PORT}`);
 }
 
-function killTree(child) {
-  if (!child || child.exitCode !== null) return;
-  try {
-    child.kill();
-  } catch {}
-  if (process.platform === 'win32' && child.pid) {
-    try {
-      spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
-    } catch {}
-  }
-}
-
 /* ------------------------------------------------------------------ *
  * target cleanup
  * ------------------------------------------------------------------ */
@@ -386,11 +374,15 @@ let profileDir = null;
 
 async function launchBrowser(bin) {
   profileDir = mkdtempSync(path.join(os.tmpdir(), 'memes-reload-'));
+  // Detached on POSIX so the browser leads its own process group: that group is
+  // the only handle on its helper processes, and stopChild(..., { tree: true })
+  // uses it to clear them before the profile directory is removed.  (Windows
+  // reaches the same tree with taskkill /T /F, so it needs no detachment.)
   browserChild = spawn(bin, [
     '--headless=new', '--disable-gpu', '--mute-audio', '--no-first-run', '--no-default-browser-check',
     '--disable-extensions', '--disable-background-networking', '--remote-allow-origins=*',
     '--remote-debugging-port=0', `--user-data-dir=${profileDir}`, 'about:blank',
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  ], { stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
   browserChild.stderr.on('data', () => {});
 
   const portFile = path.join(profileDir, 'DevToolsActivePort');
@@ -452,7 +444,11 @@ async function closeBrowser() {
   try {
     if (cdp) await Promise.race([cdp.send('Browser.close'), sleep(1500)]);
   } catch {}
-  killTree(browserChild);
+  // Browser.close is the polite path; stopChild covers the browser that ignores
+  // it and, with `tree`, whatever it spawned - helpers keep writing into the
+  // profile for a beat after the browser itself is gone, which is what left
+  // memes-reload-* directories behind on CI's Linux runners.
+  await stopChild(browserChild, { tree: true });
   await removeProfile();
 }
 
@@ -1398,9 +1394,7 @@ try {
   await closeBrowser();
   await cleanupTarget();
   // The scratch server must be gone, not merely signalled, before its data dir
-  // goes: its shutdown flush would write the dir straight back (killTree above
-  // stays for the browser, which is a tree that only a taskkill reaches on
-  // Windows).
+  // goes: its shutdown flush would write the dir straight back.
   await stopChild(server);
   // Leave no scratch data behind: the stray-state check fails the build on any
   // suite that does (see tools/leak-check.mjs).
