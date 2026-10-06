@@ -22,6 +22,7 @@
 import { spawn } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { signInGuest, describeGuestWait } from './lib/guest-signin.mjs';
+import { stopChild } from './lib/stop-child.mjs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -187,13 +188,14 @@ async function startLocal() {
   if (!alive) throw new Error('the local server never answered /api/health');
 }
 
-function stopLocal() {
-  if (child) {
-    try {
-      child.kill();
-    } catch {}
-    child = null;
-  }
+/**
+ * Stop the scratch server and wait for it to be gone: its shutdown flush would
+ * re-create the data dir the suite removes next (see lib/stop-child.mjs).
+ */
+async function stopLocal() {
+  const dying = child;
+  child = null;
+  await stopChild(dying);
 }
 
 /* ------------------------------------------------------------------ *
@@ -536,7 +538,7 @@ try {
   failures++;
   console.error(`\nSmoke test crashed: ${err.message}`);
 } finally {
-  stopLocal();
+  await stopLocal();
   // Leave no scratch data behind: the stray-state check fails the build on any
   // suite that does (see tools/leak-check.mjs). Ignored in --target mode, where
   // no scratch dir was ever created.

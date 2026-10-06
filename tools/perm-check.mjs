@@ -36,6 +36,7 @@ import { rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pickFreePort } from './lib/free-port.mjs';
+import { stopChild } from './lib/stop-child.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT_RANGE = { start: 8931, span: 40 };
@@ -128,13 +129,14 @@ async function startLocal() {
   if (!alive) throw new Error('the scratch server never answered /api/health');
 }
 
-function stopLocal() {
-  if (child) {
-    try {
-      child.kill();
-    } catch {}
-    child = null;
-  }
+/**
+ * Stop the scratch server and wait for it to be gone: its shutdown flush would
+ * re-create the data dir the suite removes next (see lib/stop-child.mjs).
+ */
+async function stopLocal() {
+  const dying = child;
+  child = null;
+  await stopChild(dying);
 }
 
 /* ------------------------------------------------------------------ *
@@ -279,7 +281,7 @@ try {
   failures++;
   console.error(`\n✗ ${err?.message || err}`);
 } finally {
-  stopLocal();
+  await stopLocal();
   rmSync(DATA, { recursive: true, force: true });
 }
 
@@ -287,8 +289,8 @@ console.log(`\n${failures === 0 ? '✓' : '✗'} ${passed} passed, ${failures} f
 exitCode = failures === 0 ? 0 : 1;
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
-  process.on(sig, () => {
-    stopLocal();
+  process.on(sig, async () => {
+    await stopLocal();
     rmSync(DATA, { recursive: true, force: true });
     process.exit(130);
   });

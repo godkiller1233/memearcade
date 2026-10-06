@@ -73,6 +73,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pickFreePort } from './lib/free-port.mjs';
+import { stopChild } from './lib/stop-child.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT_RANGE = { start: 8871, span: 40 };
@@ -1396,7 +1397,11 @@ try {
 } finally {
   await closeBrowser();
   await cleanupTarget();
-  killTree(server);
+  // The scratch server must be gone, not merely signalled, before its data dir
+  // goes: its shutdown flush would write the dir straight back (killTree above
+  // stays for the browser, which is a tree that only a taskkill reaches on
+  // Windows).
+  await stopChild(server);
   // Leave no scratch data behind: the stray-state check fails the build on any
   // suite that does (see tools/leak-check.mjs).
   rmSync(DATA, { recursive: true, force: true });

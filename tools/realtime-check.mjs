@@ -50,6 +50,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { installStorageShim } from './lib/storage-shim.mjs';
 import { signInGuest, describeGuestWait } from './lib/guest-signin.mjs';
+import { stopChild } from './lib/stop-child.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = 8831 + Math.floor(Math.random() * 40);
@@ -138,11 +139,14 @@ async function startServer() {
   if (!(await waitForHealth(base))) throw new Error('the scratch server never answered /api/health');
 }
 
-function stopServer() {
-  try {
-    child?.kill();
-  } catch {}
+/**
+ * Stop the scratch server and wait for it to be gone: its shutdown flush would
+ * re-create the data dir the suite removes next (see lib/stop-child.mjs).
+ */
+async function stopServer() {
+  const dying = child;
   child = null;
+  await stopChild(dying);
 }
 
 async function guest(name) {
@@ -1293,7 +1297,7 @@ try {
   failures++;
   console.error(`\nRealtime check crashed: ${err.stack || err.message}`);
 } finally {
-  stopServer();
+  await stopServer();
   // Leave no scratch data behind: the stray-state check fails the build on any
   // suite that does (see tools/leak-check.mjs).
   rmSync(DATA, { recursive: true, force: true });

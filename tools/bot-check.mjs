@@ -29,6 +29,7 @@ import { attachWebSocket } from '../server/lib/ws.js';
 import { Arcade } from '../bot/arcade.js';
 import { arcadeEmbed, profileEmbed, formatChangelog, changelogLine, avatarImageUrl, levelColor } from '../bot/commands.js';
 import { pong } from '../web/games/engines/arcade.js';
+import { stopChild } from './lib/stop-child.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ARCADE_PORT = 8811 + Math.floor(Math.random() * 40);
@@ -306,18 +307,6 @@ let arcadeServer = null;
 let bot = null;
 const botLog = [];
 
-function killTree(child) {
-  if (!child || child.exitCode !== null) return;
-  try {
-    child.kill();
-  } catch {}
-  if (process.platform === 'win32' && child.pid) {
-    try {
-      spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
-    } catch {}
-  }
-}
-
 async function startArcade() {
   rmSync(DATA, { recursive: true, force: true });
   console.log(`\nBooting a scratch arcade on port ${ARCADE_PORT}…`);
@@ -357,9 +346,16 @@ async function startBot() {
   await waitFor(() => fake.identified > 0, 15000, 'the bot to identify with the gateway');
 }
 
-function cleanup() {
-  killTree(bot);
-  killTree(arcadeServer);
+/**
+ * Stops the bot first, then the arcade it was talking to, and waits for both to
+ * be gone before the scratch data dir goes: the arcade's SIGTERM shutdown
+ * flushes its store, which mkdirSync's the dir back into existence - removing
+ * it early left the dir on disk for the stray-state check, and once made
+ * rmSync itself throw ENOTEMPTY on a file that had reappeared underneath.
+ */
+async function cleanup() {
+  await stopChild(bot);
+  await stopChild(arcadeServer);
   try {
     fakeWs?.close();
   } catch {}
@@ -883,7 +879,7 @@ if (typeof WebSocket !== 'function') {
     failures++;
     console.error(`\nBot check crashed: ${err.stack || err.message}`);
   } finally {
-    cleanup();
+    await cleanup();
   }
 
   console.log(`\n${failures ? `✗ ${failures} failure(s), ${passed} passed` : `✓ all ${passed} bot checks passed`}\n`);
