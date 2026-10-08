@@ -1190,16 +1190,31 @@ async function runRegressionChecks() {
           // must put the report back in the open state - on the server and in
           // both filter views.
           const readReport = async () => ((await (await fetch(`${BASE}/api/admin/reports?status=all&limit=200`, { headers: { authorization: `Bearer ${modReg.token}` } })).json().catch(() => null))?.reports || []).find((r) => r.text === filedText) || null;
-          // Re-select the resolved view: the second mount may have happened since.
-          await filterTo('Resolved');
-          const reopened = await until(`(() => {
-            const card = [...document.querySelectorAll('#admin-body .report-card')].find((c) => c.textContent.includes(${JSON.stringify(filedText)}));
-            if (!card) return false;
-            const reopen = [...card.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Reopen');
-            if (!reopen) return false;
-            reopen.click();
-            return true;
-          })()`, 'the Reopen action on the resolved report', 10000).then(() => true).catch(() => false);
+          // Re-select the resolved view *and retry the click*: the same lazy
+          // second mount that resets the filter can strand a single selection,
+          // and a slow runner loses that race where a fast one wins it.  The
+          // server record is the early exit, so a click that did land (and did
+          // reopen the report) is never mistaken for one that never happened -
+          // the panel's own Reopen action is still what has to appear and fire.
+          const clickReopen = async (ms = 10000) => {
+            const deadline = Date.now() + ms;
+            while (Date.now() < deadline) {
+              if ((await readReport())?.status === 'open') return true;
+              await filterTo('Resolved');
+              await sleep(300);
+              const hit = await evaluate(`(() => {
+                const card = [...document.querySelectorAll('#admin-body .report-card')].find((c) => c.textContent.includes(${JSON.stringify(filedText)}));
+                if (!card) return false;
+                const reopen = [...card.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Reopen');
+                if (!reopen) return false;
+                reopen.click();
+                return true;
+              })()`);
+              if (hit) return true;
+            }
+            return (await readReport())?.status === 'open';
+          };
+          const reopened = await clickReopen();
           check(reopened, 'the resolved report offers a Reopen action in the panel');
           // The round trip itself is a server fact, so poll it there; the two
           // panel views are asserted right below.
