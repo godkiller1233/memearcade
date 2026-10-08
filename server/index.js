@@ -17,6 +17,7 @@ import { createUser, getUserByName, setPassword, audit } from './store.js';
 import { GameRooms, loadEngines } from './games.js';
 import { RealtimeHub } from './realtime.js';
 import { registerApi, botSecret } from './api.js';
+import { createScheduleSweeper } from './lib/schedule.js';
 import { API_VERSION, APP_VERSION } from '../shared/version.js';
 
 async function main() {
@@ -43,6 +44,9 @@ async function main() {
   const hub = new RealtimeHub({ rooms });
   registerApi(app, { rooms, hub });
   hub.attach(app.server);
+  // Scheduled feature switches: push the change to open clients as windows
+  // open and close.  The timer is unref'd, so it never holds the process open.
+  const sweeper = createScheduleSweeper({ hub, intervalMs: config.scheduleTickMs });
 
   const port = config.port;
   await new Promise((resolve, reject) => {
@@ -73,6 +77,7 @@ async function main() {
 
   const shutdown = (signal) => {
     log(`${signal} received - shutting down`);
+    sweeper.stop();
     hub.shutdown();
     rooms.rooms.clear?.();
     db.close();

@@ -626,6 +626,29 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
 .report-card { background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
 .report-text { white-space: pre-wrap; font-size: 0.9rem; }
 .feature-pick { display: flex; flex-wrap: wrap; gap: 6px; max-height: 240px; overflow: auto; }
+/* Feature switches: one row per feature/game, two switches on the right. */
+.feature-group { display: flex; flex-direction: column; gap: 6px; }
+.feature-group > h4 { margin: 10px 0 2px; text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.72rem; color: var(--text-dim); }
+.feature-row {
+  display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px 12px;
+}
+.feature-row.off { border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); opacity: 0.9; }
+.feature-main { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 220px; }
+.feature-main .icon { font-size: 1.1rem; }
+.feature-switches { display: flex; gap: 14px; align-items: center; }
+.mini-toggle { display: flex; gap: 6px; align-items: center; cursor: pointer; font-size: 0.82rem; color: var(--text-dim); }
+.mini-toggle input { accent-color: var(--accent); width: 16px; height: 16px; cursor: pointer; }
+.keep-picker { display: flex; gap: 6px; align-items: center; font-size: 0.82rem; color: var(--text-dim); cursor: pointer; }
+.keep-picker select.keep-role { width: auto; padding: 5px 8px; font-size: 0.82rem; cursor: pointer; }
+.day-chips { display: flex; gap: 4px; }
+.day-chip {
+  width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--line);
+  background: var(--surface-2); color: var(--text-dim); cursor: pointer; font-size: 0.78rem; font-weight: 700;
+}
+.day-chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.day-chip:hover { border-color: var(--accent); }
+input[type="time"].input { max-width: 130px; }
 .audit-row { padding: 4px 0; border-bottom: 1px dashed var(--line); font-size: 0.84rem; }
 .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
 .stat { background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px; }

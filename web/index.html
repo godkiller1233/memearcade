@@ -49,20 +49,23 @@
       <button id="nav-toggle" class="icon-btn" title="Menu">☰</button>
       <div class="logo small">MEMES<span>ARCADE</span></div>
       <nav class="tabs nav">
+        <!-- data-feature: the tab follows that switch in the admin console.  A
+             feature a player has lost (off, or hidden by the owner) simply has
+             no tab for them; staff keep every tab. -->
         <button class="tab on" data-view="home">Home</button>
-        <button class="tab" data-view="catalog">Games</button>
-        <button class="tab" data-view="lobby">Lobby</button>
-        <button class="tab" data-view="suggestions">💡 Ideas</button>
-        <button class="tab" data-view="changelog">📦 Changelog</button>
-        <button class="tab" data-view="friends">Friends</button>
-        <button class="tab" data-view="chat">Chat</button>
+        <button class="tab" data-view="catalog" data-feature="catalog">Games</button>
+        <button class="tab" data-view="lobby" data-feature="lobby">Lobby</button>
+        <button class="tab" data-view="suggestions" data-feature="suggestions">💡 Ideas</button>
+        <button class="tab" data-view="changelog" data-feature="changelog">📦 Changelog</button>
+        <button class="tab" data-view="friends" data-feature="friends">Friends</button>
+        <button class="tab" data-view="chat" data-feature="chat">Chat</button>
         <button class="tab" data-view="profile">Profile</button>
         <button class="tab" data-view="settings">Settings</button>
-        <button class="tab" data-view="download">Download</button>
+        <button class="tab" data-view="download" data-feature="downloads">Download</button>
         <button class="tab admin-only hidden" data-view="admin">Admin<span id="admin-badge" class="badge hidden"></span></button>
       </nav>
       <div class="top-actions">
-        <button id="music-toggle" class="icon-btn" title="Music on/off">🔊</button>
+        <button id="music-toggle" class="icon-btn" data-feature="music" title="Music on/off">🔊</button>
         <button id="theme-toggle" class="icon-btn" title="Cycle theme">🎨</button>
         <div id="me-chip" class="me-chip" title="Your profile"></div>
         <button id="logout" class="icon-btn" title="Sign out">⎋</button>
@@ -73,15 +76,15 @@
 
     <main class="layout">
       <aside id="sidebar" class="sidebar">
-        <div class="side-block">
+        <div class="side-block" data-feature="parties">
           <h4>Your party</h4>
           <div id="side-party" class="side-party"></div>
         </div>
-        <div class="side-block">
+        <div class="side-block" data-feature="friends">
           <h4>Online now</h4>
           <div id="side-online" class="side-online"></div>
         </div>
-        <div class="side-block">
+        <div class="side-block" data-feature="catalog">
           <h4>Quick play</h4>
           <div id="side-quick" class="side-quick"></div>
         </div>

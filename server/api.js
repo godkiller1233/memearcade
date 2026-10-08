@@ -52,6 +52,29 @@ import {
   userPublic,
 } from './store.js';
 import { engineCatalog, engineErrors, getEngine } from './games.js';
+import {
+  DEFAULT_KEEP_ROLE,
+  DEFAULT_SCHEDULE,
+  FEATURES,
+  FEATURE_GROUPS,
+  KEEP_ROLES,
+  KEEP_ROLE_LABELS,
+  featureAllowed,
+  featureById,
+  featureLabel,
+  featureRefusal,
+  featureState,
+  gameAllowed,
+  gameRefusal,
+  gameState,
+  nextScheduleChange,
+  normalizeFeatures,
+  normalizeGames,
+  normalizeKeepRole,
+  normalizeSchedule,
+  scheduleActive,
+} from '../shared/features.js';
+import { publicConfig, catalogFor as catalogForAccount } from './lib/public-config.js';
 import { onlineCount } from './lib/presence.js';
 import { metaPayload, negotiate, APP_NAME, APP_VERSION, API_VERSION, MIN_CLIENT_VERSION } from '../shared/version.js';
 import { downloadManifest, getDownload } from './lib/downloads.js';
@@ -147,6 +170,52 @@ function authRate(ctx, name, max = 12, windowMs = 60000) {
   return r;
 }
 
+/** The signed-in user for this request, or null.  Never throws. */
+function optionalUser(ctx) {
+  const token = tokenOf(ctx);
+  return token ? sessionUser(token)?.user || null : null;
+}
+
+/**
+ * The caller's account, whether or not the route demanded one already.
+ * Some public routes (the idea board, downloads) still vary for staff.
+ */
+function caller(ctx) {
+  return ctx.user || optionalUser(ctx);
+}
+
+/**
+ * Refuse a feature an owner switched off or hid from this caller.  A caller at
+ * or above the feature's keep-floor keeps access - staff by default, so the
+ * person who turned a feature off can always turn it back on; a higher floor
+ * keeps it for VIPs or admins while players lose it.
+ */
+function requireFeature(ctx, id) {
+  if (featureFor(ctx, id)) return;
+  throw new HttpError(403, featureRefusal(db.data.config, id));
+}
+
+/** May this caller use the feature right now?  Role-aware, unlike featureOn(). */
+function featureFor(ctx, id) {
+  return featureAllowed(db.data.config, id, { role: caller(ctx)?.role });
+}
+
+/** Refuse one catalog entry switched off or hidden from this caller. */
+function requireGame(ctx, gameId) {
+  if (gameAllowed(db.data.config, gameId, { role: caller(ctx)?.role })) return;
+  const name = GAMES.find((g) => g.id === gameId)?.name || getEngine(gameId)?.meta.name || gameId;
+  throw new HttpError(403, gameRefusal(db.data.config, gameId, name));
+}
+
+/**
+ * The catalog as this caller may see it.  Players lose the games an owner
+ * switched off or hid; staff keep the full list, annotated with `hiddenFor` so
+ * the UI can badge what players are missing.
+ */
+function catalogFor(ctx) {
+  return catalogForAccount(caller(ctx));
+}
+
 /* ------------------------------------------------------------------ *
  * Routes
  * ------------------------------------------------------------------ */
@@ -167,8 +236,7 @@ export function registerApi(app, { rooms, hub }) {
   app.get('/api/meta', (ctx) => {
     const client = clientOf(ctx);
     const negotiated = negotiate(client, { allowUnknown: true });
-    const engines = engineCatalog();
-    const catalog = catalogWithEngines(engines);
+    const catalog = catalogFor(ctx);
     ctx.res.setHeader('X-Memes-Api', String(API_VERSION));
     if (!negotiated.ok) {
       ctx.res.setHeader('X-Memes-Upgrade-Required', String(MIN_CLIENT_VERSION));
@@ -183,14 +251,17 @@ export function registerApi(app, { rooms, hub }) {
       client: negotiated.client,
       degraded: negotiated.degraded,
       negotiatedCaps: negotiated.caps,
+      // The legacy summary keys stay (API v3 only ever grows); the full
+      // per-feature switch map travels in config.features, which the client
+      // uses to hide what is off or unlisted.
       features: {
         discordBot: config.discord.enabled,
-        desktop: true,
+        desktop: featureFor(ctx, 'downloads'),
         registrations: db.data.config.registrationsOpen,
         maintenance: db.data.config.maintenance,
-        rooms: true,
-        spectate: true,
-        bots: true,
+        rooms: featureFor(ctx, 'rooms'),
+        spectate: featureFor(ctx, 'spectate'),
+        bots: featureFor(ctx, 'bots'),
       },
       counts: {
         games: catalog.length,
@@ -198,7 +269,7 @@ export function registerApi(app, { rooms, hub }) {
         registered: Object.keys(db.data.users).length,
         online: onlineCount(),
       },
-      config: publicConfig(),
+      config: publicConfig(caller(ctx)),
     });
   });
 
@@ -301,8 +372,7 @@ export function registerApi(app, { rooms, hub }) {
   /* ---------------- catalog ---------------- */
 
   app.get('/api/games', (ctx) => {
-    const engines = engineCatalog();
-    const catalog = catalogWithEngines(engines);
+    const catalog = catalogFor(ctx);
     const category = ctx.query.get('category');
     const q = (ctx.query.get('q') || '').toLowerCase();
     const filtered = catalog.filter(
@@ -315,16 +385,18 @@ export function registerApi(app, { rooms, hub }) {
     const engine = getEngine(ctx.params.id);
     const meta = GAMES.find((g) => g.id === ctx.params.id) || (engine ? engine.meta : null);
     if (!meta) throw new HttpError(404, 'No such game.');
+    requireGame(ctx, meta.id);
     return {
       ok: true,
       game: { ...meta, engine: !!engine, playable: !!engine },
       rules: engine?.meta.rules || meta.rules || null,
       options: engine?.meta.options || meta.options || [],
-      leaderboard: leaderboard(ctx.params.id, 10).entries,
+      leaderboard: featureFor(ctx, 'leaderboard') ? leaderboard(ctx.params.id, 10).entries : [],
     };
   });
 
   app.get('/api/leaderboard', (ctx) => {
+    requireFeature(ctx, 'leaderboard');
     const gameId = ctx.query.get('game') || null;
     // rankedBy tells the caller what `score` holds: points, games played or wins.
     return { ok: true, gameId, ...leaderboard(gameId, 25) };
@@ -368,11 +440,13 @@ export function registerApi(app, { rooms, hub }) {
 
   app.get('/api/friends', (ctx) => {
     const user = requireAuth(ctx);
+    requireFeature(ctx, 'friends');
     return { ok: true, friends: friendList(user.id), ids: friendIds(user.id) };
   });
 
   app.post('/api/friends', (ctx) => {
     const user = requireAuth(ctx);
+    requireFeature(ctx, 'friends');
     const target = getUser(ctx.body.userId) || getUserByName(ctx.body.name);
     if (!target) throw new HttpError(404, 'User not found.');
     const rec = ctx.body.action === 'accept' ? acceptFriend(user, target) : requestFriend(user, target);
@@ -388,6 +462,7 @@ export function registerApi(app, { rooms, hub }) {
 
   app.delete('/api/friends/:id', (ctx) => {
     const user = requireAuth(ctx);
+    requireFeature(ctx, 'friends');
     const target = getUser(ctx.params.id);
     if (!target) throw new HttpError(404, 'User not found.');
     removeFriend(user, target);
@@ -397,6 +472,7 @@ export function registerApi(app, { rooms, hub }) {
 
   app.get('/api/dm', (ctx) => {
     const user = requireAuth(ctx);
+    requireFeature(ctx, 'dm');
     const target = getUser(ctx.query.get('with')) || getUserByName(ctx.query.get('with'));
     if (!target) throw new HttpError(404, 'User not found.');
     return { ok: true, with: userPublic(target), messages: dmHistory(user, target) };
@@ -404,11 +480,13 @@ export function registerApi(app, { rooms, hub }) {
 
   app.get('/api/dm/conversations', (ctx) => {
     const user = requireAuth(ctx);
+    requireFeature(ctx, 'dm');
     return { ok: true, conversations: dmConversations(user.id) };
   });
 
   app.post('/api/dm', (ctx) => {
     const user = requireAuth(ctx);
+    requireFeature(ctx, 'dm');
     const target = getUser(ctx.body.to) || getUserByName(ctx.body.to);
     if (!target) throw new HttpError(404, 'User not found.');
     const text = sanitizeText(ctx.body.text);
@@ -420,14 +498,18 @@ export function registerApi(app, { rooms, hub }) {
 
   /* ---------------- rooms ---------------- */
 
-  app.get('/api/rooms', (ctx) => ({
-    ok: true,
-    rooms: rooms.lobbyList({ gameId: ctx.query.get('game') }),
-    stats: rooms.stats(),
-    online: onlineCount(),
-  }));
+  app.get('/api/rooms', (ctx) => {
+    requireFeature(ctx, 'lobby');
+    return {
+      ok: true,
+      rooms: rooms.lobbyList({ gameId: ctx.query.get('game') }),
+      stats: rooms.stats(),
+      online: onlineCount(),
+    };
+  });
 
   app.get('/api/rooms/:code', (ctx) => {
+    requireFeature(ctx, 'rooms');
     const wanted = String(ctx.params.code).toUpperCase();
     const room = [...rooms.rooms.values()].find((r) => r.code === wanted || r.id === ctx.params.code);
     if (!room) throw new HttpError(404, 'No room with that code.');
@@ -436,18 +518,23 @@ export function registerApi(app, { rooms, hub }) {
 
   app.post('/api/rooms', (ctx) => {
     const user = requireAuth(ctx);
+    requireFeature(ctx, 'rooms');
     const engine = getEngine(ctx.body.gameId);
     if (!engine) throw new HttpError(400, `"${ctx.body.gameId}" is not playable yet.`);
+    requireGame(ctx, engine.meta.id);
     const room = rooms.createRoom({
       gameId: ctx.body.gameId,
       host: user,
       visibility: ctx.body.visibility === 'private' ? 'private' : 'public',
       options: ctx.body.options || {},
     });
-    for (let i = 0; i < Math.min(8, Number(ctx.body.bots) || 0); i++) {
-      try {
-        rooms.addBot(room, { level: ctx.body.botLevel || 2, by: user });
-      } catch {}
+    // Bots are their own switch: refused here just like in the realtime hub.
+    if (featureFor(ctx, 'bots')) {
+      for (let i = 0; i < Math.min(8, Number(ctx.body.bots) || 0); i++) {
+        try {
+          rooms.addBot(room, { level: ctx.body.botLevel || 2, by: user });
+        } catch {}
+      }
     }
     if (ctx.body.autostart && rooms.canStart(room)) rooms.start(room);
     return { ok: true, room: rooms.roomInfo(room), code: room.code };
@@ -455,9 +542,13 @@ export function registerApi(app, { rooms, hub }) {
 
   /* ---------------- desktop downloads ---------------- */
 
-  app.get('/api/downloads', (ctx) => downloadManifest({ server: ctx.query.get('server') || '' }));
+  app.get('/api/downloads', (ctx) => {
+    requireFeature(ctx, 'downloads');
+    return downloadManifest({ server: ctx.query.get('server') || '' });
+  });
 
   app.get('/api/downloads/:id', (ctx) => {
+    requireFeature(ctx, 'downloads');
     const item = getDownload(ctx.params.id, { server: ctx.query.get('server') || '' });
     if (!item) throw new HttpError(404, 'No such download.');
     return {
@@ -475,7 +566,8 @@ export function registerApi(app, { rooms, hub }) {
 
   /* ---------------- music & assets ---------------- */
 
-  app.get('/api/music', () => {
+  app.get('/api/music', (ctx) => {
+    requireFeature(ctx, 'music');
     const dir = path.join(config.webDir, 'assets', 'music');
     const files = [];
     try {
@@ -515,7 +607,8 @@ export function registerApi(app, { rooms, hub }) {
   /* ---------------- suggestions (public idea board) ---------------- */
 
   app.get('/api/suggestions', (ctx) => {
-    const viewer = tokenOf(ctx) ? sessionUser(tokenOf(ctx))?.user : null;
+    requireFeature(ctx, 'suggestions');
+    const viewer = caller(ctx);
     const sort = ctx.query.get('sort') === 'new' ? 'new' : 'top';
     const status = String(ctx.query.get('status') || 'all');
     const category = String(ctx.query.get('category') || 'all');
@@ -540,6 +633,7 @@ export function registerApi(app, { rooms, hub }) {
 
   app.post('/api/suggestions', (ctx) => {
     const user = requireAuth(ctx);
+    requireFeature(ctx, 'suggestions');
     const limit = rateLimit(`suggest:${user.id}`, 5, 3600000);
     if (!limit.ok) {
       const mins = Math.max(1, Math.ceil(limit.retryAfter / 60000));
@@ -577,6 +671,7 @@ export function registerApi(app, { rooms, hub }) {
 
   app.post('/api/suggestions/:id/vote', (ctx) => {
     const user = requireAuth(ctx);
+    requireFeature(ctx, 'suggestions');
     const suggestion = db.data.suggestions.find((s) => s.id === ctx.params.id);
     if (!suggestion) throw new HttpError(404, 'That suggestion is gone.');
     suggestion.votes ||= {};
@@ -591,6 +686,7 @@ export function registerApi(app, { rooms, hub }) {
   /* ---------------- changelog (shipped ideas) ---------------- */
 
   app.get('/api/changelog', (ctx) => {
+    requireFeature(ctx, 'changelog');
     const shipped = db.data.suggestions
       .filter((s) => s.status === 'done')
       .sort((a, b) => (b.updatedAt || b.at || 0) - (a.updatedAt || a.at || 0));
@@ -625,7 +721,8 @@ export function registerApi(app, { rooms, hub }) {
   /* ---------------- reports ---------------- */
 
   app.post('/api/report', (ctx) => {
-    const user = tokenOf(ctx) ? sessionUser(tokenOf(ctx))?.user : null;
+    requireFeature(ctx, 'reports');
+    const user = caller(ctx);
     const text = sanitizeText(ctx.body.text, 1000);
     if (!text) throw new HttpError(400, 'Tell us what happened.');
     const kind = sanitizeText(ctx.body.kind, 40) || 'bug';
@@ -756,7 +853,129 @@ export function registerApi(app, { rooms, hub }) {
     if (typeof db.data.config.announcement === 'string') db.data.config.announcement = sanitizeText(db.data.config.announcement, 300);
     audit(actor, 'config.update', null, { keys: Object.keys(ctx.body) });
     db.touch();
+    hub?.broadcastConfig();
     return { ok: true, config: db.data.config };
+  });
+
+  /* ---------------- admin: feature switches ---------------- */
+
+  /**
+   * One row of the switch panel: the descriptor, the stored switches, the
+   * keep-floor, the schedule as the editor wants it (a disabled draft when
+   * there is none), and what the clock says right now - `closed` plus the next
+   * flip, so the console can say "closed until 08:00" instead of leaving an
+   * owner to do the math.
+   */
+  function featureAdminView(id, at = new Date()) {
+    const descriptor = featureById(id);
+    const stored = featureState(db.data.config, id);
+    const schedule = normalizeSchedule(stored.schedule);
+    const next = nextScheduleChange(schedule, at);
+    const draft = schedule || { ...DEFAULT_SCHEDULE, enabled: false, days: [...DEFAULT_SCHEDULE.days] };
+    return {
+      ...descriptor,
+      on: stored.on,
+      hidden: stored.hidden,
+      // The rung the feature is kept for while it is off or hidden.
+      minRole: stored.minRole,
+      schedule: draft,
+      // True when a schedule is actually stored, so the editor can tell "no
+      // schedule" from "scheduled hours currently paused" and offer Clear only
+      // when there is something to clear.
+      hasSchedule: !!schedule,
+      closed: scheduleActive(schedule, at),
+      nextChange: next ? next.toISOString() : null,
+    };
+  }
+
+  /**
+   * Every switch the console shows, with the state each one is in.  Built from
+   * the shared descriptor list, so the panel can never grow an option the
+   * server does not know how to enforce.
+   */
+  app.get('/api/admin/features', (ctx) => {
+    requireStaff(ctx, ROLES.admin);
+    const at = new Date();
+    const features = FEATURES.map((f) => featureAdminView(f.id, at));
+    const games = catalogWithEngines(engineCatalog()).map((game) => {
+      const state = gameState(db.data.config, game.id);
+      return {
+        id: game.id,
+        name: game.name,
+        icon: game.icon,
+        category: game.category,
+        playable: game.playable,
+        on: state.on,
+        hidden: state.hidden,
+        minRole: state.minRole,
+      };
+    });
+    return {
+      ok: true,
+      now: at.toISOString(),
+      groups: FEATURE_GROUPS,
+      // The ladder itself, so the panel offers exactly the rungs the server
+      // knows how to enforce.
+      keepRoles: KEEP_ROLES.map((id) => ({ id, label: KEEP_ROLE_LABELS[id] })),
+      features,
+      games,
+      counts: {
+        off: features.filter((f) => f.on === false).length,
+        hidden: features.filter((f) => f.hidden).length,
+        scheduled: features.filter((f) => f.closed).length,
+        restricted: features.filter((f) => f.minRole !== DEFAULT_KEEP_ROLE).length,
+        gamesOff: games.filter((g) => !g.on).length,
+        gamesHidden: games.filter((g) => g.hidden).length,
+        gamesRestricted: games.filter((g) => g.minRole !== DEFAULT_KEEP_ROLE).length,
+      },
+    };
+  });
+
+  app.post('/api/admin/features', (ctx) => {
+    const actor = requireStaff(ctx, ROLES.admin);
+    const id = String(ctx.body.id || '');
+    if (!featureById(id)) throw new HttpError(400, `Unknown feature "${id}".`);
+    const before = featureState(db.data.config, id);
+    const next = {
+      on: ctx.body.on === undefined ? before.on : ctx.body.on !== false,
+      hidden: ctx.body.hidden === undefined ? before.hidden : ctx.body.hidden === true,
+    };
+    // A manual switch change must never drop a schedule: only a body that
+    // carries its own `schedule` key replaces (or clears) it.
+    if (before.schedule) next.schedule = before.schedule;
+    const touchedSchedule = Object.prototype.hasOwnProperty.call(ctx.body, 'schedule');
+    if (touchedSchedule) {
+      const schedule = normalizeSchedule(ctx.body.schedule);
+      if (schedule) next.schedule = schedule;
+      else delete next.schedule;
+    }
+    // Same for the keep-floor: named rung, junk falls back to staff.
+    const touchedKeep = Object.prototype.hasOwnProperty.call(ctx.body, 'minRole');
+    next.minRole = touchedKeep ? normalizeKeepRole(ctx.body.minRole) : before.minRole;
+    db.data.config.features = normalizeFeatures({ ...db.data.config.features, [id]: next });
+    audit(actor, touchedSchedule ? 'feature.schedule' : touchedKeep ? 'feature.roles' : 'feature.toggle', id, { ...next, before });
+    db.touch();
+    hub?.broadcastConfig();
+    return { ok: true, ...featureAdminView(id), config: publicConfig(actor) };
+  });
+
+  /** The same two switches and keep-floor for one catalog entry. */
+  app.post('/api/admin/games/:id', (ctx) => {
+    const actor = requireStaff(ctx, ROLES.admin);
+    const gameId = String(ctx.params.id);
+    if (!GAMES.some((g) => g.id === gameId) && !getEngine(gameId)) throw new HttpError(404, 'No such game.');
+    const before = gameState(db.data.config, gameId);
+    const touchedKeep = Object.prototype.hasOwnProperty.call(ctx.body, 'minRole');
+    const next = {
+      on: ctx.body.on === undefined ? before.on : ctx.body.on !== false,
+      hidden: ctx.body.hidden === undefined ? before.hidden : ctx.body.hidden === true,
+      minRole: touchedKeep ? normalizeKeepRole(ctx.body.minRole) : before.minRole,
+    };
+    db.data.config.games = normalizeGames({ ...db.data.config.games, [gameId]: next });
+    audit(actor, touchedKeep ? 'game.roles' : 'game.visibility', gameId, { ...next, before });
+    db.touch();
+    hub?.broadcastConfig();
+    return { ok: true, id: gameId, ...next, config: publicConfig(actor) };
   });
 
   app.post('/api/admin/broadcast', (ctx) => {
@@ -980,18 +1199,6 @@ function suggestionPublic(suggestion, viewerId) {
     voted: !!(viewerId && suggestion.votes?.[viewerId]),
     adminNote: suggestion.adminNote || null,
     adminName: suggestion.adminName || null,
-  };
-}
-
-function publicConfig() {
-  return {
-    registrationsOpen: db.data.config.registrationsOpen,
-    maintenance: db.data.config.maintenance,
-    motd: db.data.config.motd,
-    announcement: db.data.config.announcement,
-    featured: db.data.config.featured,
-    maxPartySize: db.data.config.maxPartySize,
-    maxRooms: db.data.config.maxRooms,
   };
 }
 

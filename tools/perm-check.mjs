@@ -150,6 +150,7 @@ const stamp = Date.now().toString(36);
 let ownerToken = '';
 let userToken = '';
 let modToken = '';
+let vipToken = '';
 let plainUserId = '';
 let reportId = '';
 let suggestionId = '';
@@ -186,6 +187,24 @@ const ROUTES = [
   {
     id: 'POST /api/admin/suggestions/:id', level: 'admin', method: 'POST',
     path: () => `/api/admin/suggestions/${suggestionId}`, body: () => ({ op: 'update', status: 'planned' }),
+  },
+  { id: 'GET  /api/admin/features', level: 'admin', method: 'GET', path: () => '/api/admin/features' },
+  {
+    // Each arm writes the default state back, so the matrix never leaves a
+    // feature switched off for whichever route runs next.
+    id: 'POST /api/admin/features', level: 'admin', method: 'POST',
+    path: () => '/api/admin/features', body: () => ({ id: 'catalog', on: true, hidden: false }),
+  },
+  {
+    // A scheduled window is a switch change too, so it sits behind the same
+    // admin rung. The arm only clears chat's schedule ('schedule: null'), which
+    // is a safe default to leave behind.
+    id: 'POST /api/admin/features (schedule)', level: 'admin', method: 'POST',
+    path: () => '/api/admin/features', body: () => ({ id: 'chat', schedule: null }),
+  },
+  {
+    id: 'POST /api/admin/games/:id', level: 'admin', method: 'POST',
+    path: () => `/api/admin/games/${gameId}`, body: () => ({ on: true, hidden: false }),
   },
   { id: 'GET  /api/bot/secret', level: 'admin', method: 'GET', path: () => '/api/bot/secret' },
 ];
@@ -236,6 +255,18 @@ async function run() {
     check(false, 'the owner promotes the second account to moderator', 'no owner session or moderator id to work with');
   }
 
+  const vipReg = await api('POST', '/api/auth/register', { name: `perm-vip-${stamp}`, password: 'perm-pass-2026' });
+  vipToken = vipReg.payload?.token || '';
+  const vipId = vipReg.payload?.user?.id || '';
+  check(!!vipToken && !!vipId, 'a third account registers to become the VIP', vipReg.payload?.message);
+
+  if (ownerToken && vipId) {
+    const promoted = await api('POST', `/api/admin/users/${vipId}`, { op: 'role', role: 'vip' }, ownerToken);
+    check(promoted.ok && promoted.payload?.role === 'vip', 'the owner promotes the third account to VIP', promoted.payload?.message);
+  } else {
+    check(false, 'the owner promotes the third account to VIP', 'no owner session or VIP id to work with');
+  }
+
   // Fixtures for the routes that address a resource.
   const report = await api('POST', '/api/report', { text: 'Permission-matrix fixture report.', kind: 'bug' }, userToken);
   check(report.ok, 'a report exists for the report-triage route', report.payload?.message);
@@ -267,6 +298,60 @@ async function run() {
     await arm(route, 'admin     ', ownerToken, 200);
     note(`${route.id} is ${route.level === 'admin' ? 'admin-only' : 'moderator-level'} — table verified`);
   }
+
+  /* ------------------------------------------------------------------ *
+   * role keep-floors
+   *
+   * The same switch resolved per role: a feature kept for VIPs is served to the
+   * VIP and the moderator while the plain user loses it, and an owner-only floor
+   * locks even a moderator out - the "staff always keep access" rule the arcade
+   * used before keep-floors existed.  Every switch this section sets is put back
+   * to the arcade-wide default before it returns.
+   * ------------------------------------------------------------------ */
+  if (!vipToken) {
+    check(false, 'the role keep-floor section runs', 'the VIP account did not register');
+    return;
+  }
+
+  /** Put one feature back to the default switches and staff keep-floor. */
+  const resetFeature = (id) => api('POST', '/api/admin/features', { id, on: true, hidden: false, minRole: 'mod', schedule: null }, ownerToken);
+  try {
+    const kept = await api('POST', '/api/admin/features', { id: 'suggestions', on: false, minRole: 'vip' }, ownerToken);
+    check(kept.ok && kept.payload?.on === false && kept.payload?.minRole === 'vip',
+      'the owner keeps the idea board for VIPs and switches it off', JSON.stringify(kept.payload?.minRole));
+    check((await api('GET', '/api/suggestions')).status === 403, 'no session loses a VIP-kept feature');
+    check((await api('GET', '/api/suggestions', undefined, userToken)).status === 403, 'a plain user loses a VIP-kept feature');
+    check((await api('GET', '/api/suggestions', undefined, vipToken)).status === 200, 'a VIP keeps a VIP-kept feature');
+    check((await api('GET', '/api/suggestions', undefined, modToken)).status === 200, 'a moderator keeps a VIP-kept feature');
+    check((await api('GET', '/api/suggestions', undefined, ownerToken)).status === 200, 'the owner keeps a VIP-kept feature');
+    const userFlags = (await api('GET', '/api/meta', undefined, userToken)).payload?.config?.features?.suggestions;
+    const vipFlags = (await api('GET', '/api/meta', undefined, vipToken)).payload?.config?.features?.suggestions;
+    check(userFlags?.on === false && vipFlags?.on === true,
+      'one switch reads off for the user and on for the VIP', `${JSON.stringify(userFlags)} vs ${JSON.stringify(vipFlags)}`);
+
+    const ownerOnly = await api('POST', '/api/admin/features', { id: 'changelog', on: false, minRole: 'owner' }, ownerToken);
+    check(ownerOnly.ok && ownerOnly.payload?.minRole === 'owner', 'the owner keeps the changelog for owner only', ownerOnly.payload?.message);
+    check((await api('GET', '/api/changelog', undefined, vipToken)).status === 403, 'a VIP loses an owner-only feature');
+    check((await api('GET', '/api/changelog', undefined, modToken)).status === 403, 'a moderator loses an owner-only feature');
+    check((await api('GET', '/api/changelog', undefined, ownerToken)).status === 200, 'the owner keeps an owner-only feature');
+    const modFlags = (await api('GET', '/api/meta', undefined, modToken)).payload?.config?.features?.changelog;
+    check(modFlags?.on === false, 'a locked-out moderator sees the switch as off', JSON.stringify(modFlags));
+
+    const panel = await api('GET', '/api/admin/features', undefined, ownerToken);
+    check((panel.payload?.keepRoles || []).map((r) => r.id).join(',') === 'user,vip,mod,admin,owner',
+      'the panel is offered the whole ladder', JSON.stringify(panel.payload?.keepRoles));
+    check((panel.payload?.features || []).find((f) => f.id === 'suggestions')?.minRole === 'vip', 'the panel shows a feature its keep-floor');
+    check((panel.payload?.counts?.restricted ?? 0) >= 2, 'the panel counts the role-kept features', String(panel.payload?.counts?.restricted));
+
+    const junk = await api('POST', '/api/admin/features', { id: 'suggestions', minRole: 'root' }, ownerToken);
+    check(junk.ok && junk.payload?.minRole === 'mod', 'a junk keep-floor falls back to staff', JSON.stringify(junk.payload?.minRole));
+  } finally {
+    await resetFeature('suggestions');
+    await resetFeature('changelog');
+  }
+  const restored = (await api('GET', '/api/meta', undefined, vipToken)).payload?.config?.features;
+  check(restored?.suggestions?.on === true && restored?.changelog?.on === true,
+    'the keep-floors this section set are back to normal', JSON.stringify(restored?.suggestions));
 }
 
 /* ------------------------------------------------------------------ *

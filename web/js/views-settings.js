@@ -1,6 +1,6 @@
 /** Profile and Settings views (the admin console lives in views-admin.js). */
 import { el, btn, pill, avatar, toast, modal, timeAgo } from './dom.js';
-import { state, setSettings, KEYBIND_ACTIONS, THEMES, bindKeyCapture } from './store.js';
+import { state, setSettings, featureOn, KEYBIND_ACTIONS, THEMES, bindKeyCapture } from './store.js';
 import { api } from './api.js';
 import { rt } from './realtime.js';
 import { toggleMusic, setTrack, TRACKS, sfx, listMusicFiles } from './audio.js';
@@ -192,7 +192,9 @@ export function settingsView(mount) {
       }
     }, { variant: 'primary' })),
     el('div', { class: 'row' },
-      btn('Report a bug', () => {
+      // Reporting follows its switch like everything else (the admin console
+      // keeps its inbox either way - it is for reading old reports too).
+      featureOn('reports') ? btn('Report a bug', () => {
         const input = el('textarea', { class: 'input area', placeholder: 'What happened?' });
         const handle = modal('Report a bug', el('div', { class: 'col' }, input, btn('Send to admins', async () => {
           try {
@@ -203,7 +205,7 @@ export function settingsView(mount) {
             toast(err.message, 'bad');
           }
         }, { variant: 'primary' })));
-      }, { cls: 'sm' }),
+      }, { cls: 'sm' }) : null,
       btn('Sign out', async () => {
         const { logout, isSignedIn } = await import('./api.js');
         await logout();

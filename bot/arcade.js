@@ -57,6 +57,15 @@ export class Arcade {
     return this.request('GET', '/api/health');
   }
 
+  /**
+   * The public handshake (/api/meta): version negotiation plus `config`, which
+   * carries the feature switches (on / hidden / scheduled) the bot must respect.
+   * Bounded by the caller when it cannot wait - see FeatureGate in commands.js.
+   */
+  meta({ timeoutMs } = {}) {
+    return this.request('GET', '/api/meta', { timeoutMs });
+  }
+
   /** Public board read - the same shape the website uses. */
   suggestions({ sort = 'top', status = 'all', category = 'all' } = {}) {
     const q = new URLSearchParams({ sort, status, category });

@@ -7,7 +7,7 @@
  * its own, so the panel never shows stale players, rooms or reports.
  */
 import { el, btn, pill, avatar, toast, modal, confirmDialog, timeAgo, fmtNum, clear } from './dom.js';
-import { state, isStaff, isAdmin } from './store.js';
+import { state, isStaff, isAdmin, setServerConfig } from './store.js';
 import { api } from './api.js';
 import { rt } from './realtime.js';
 
@@ -18,6 +18,7 @@ const TABS = [
   { id: 'overview', label: '📊 Overview', admin: true },
   { id: 'players', label: '👥 Players' },
   { id: 'site', label: '🎛️ Site', admin: true },
+  { id: 'features', label: '🎚️ Features', admin: true },
   { id: 'rooms', label: '🎮 Rooms' },
   { id: 'reports', label: '📨 Reports' },
   { id: 'ideas', label: '💡 Ideas', admin: true },
@@ -84,7 +85,7 @@ export function adminView(mount) {
       for (const n of nodes) body.appendChild(n);
     };
     const fail = (err) => draw([el('div', { class: 'card' }, el('p', { class: 'error', text: err.message || 'Something went wrong.' }))]);
-    ({ overview: drawOverview, players: drawPlayers, site: drawSite, rooms: drawRooms, reports: drawReports, ideas: drawIdeas, audit: drawAudit, bot: drawBot })[id](draw, fail, mnt);
+    ({ overview: drawOverview, players: drawPlayers, site: drawSite, features: drawFeatures, rooms: drawRooms, reports: drawReports, ideas: drawIdeas, audit: drawAudit, bot: drawBot })[id](draw, fail, mnt);
   }
 
   paintTabs();
@@ -331,6 +332,304 @@ function drawSite(draw, fail) {
       ),
     ]);
   }).catch(fail);
+}
+
+/* ------------------------------------------------------------------ *
+ * feature switches
+ * ------------------------------------------------------------------ */
+
+/**
+ * Every switch in the arcade, in one place.
+ *
+ * Two independent toggles per row, because "off" and "hidden" answer
+ * different questions: off refuses the feature below its keep-floor (staff by
+ * default, so the owner can always turn it back on), while hidden keeps it
+ * working but unadvertised.  One more pair per game does the same for the
+ * library, and every row also picks its keep-floor - the lowest role the
+ * feature is kept for, so an owner can keep it for VIPs while players lose it.
+ * Rows are rendered straight from /api/admin/features, which is built from the
+ * server's own descriptor list and ladder - the panel can never offer a switch
+ * or a rung the server does not know how to enforce.
+ */
+function drawFeatures(draw, fail) {
+  const filter = el('input', { class: 'input', placeholder: 'Filter features and games…', style: { maxWidth: '300px' } });
+  const summary = el('span', { class: 'muted small' });
+  const featureBox = el('div', { class: 'col' });
+  const gameBox = el('div', { class: 'col' });
+  let model = { groups: [], keepRoles: [], features: [], games: [] };
+
+  const load = () => api.get('/api/admin/features').then((res) => {
+    if (!featureBox.isConnected) return;
+    model = res;
+    paint();
+  }).catch(fail);
+
+  /** Recount from the model, so the summary never disagrees with the rows. */
+  const recount = () => {
+    model.counts = {
+      off: model.features.filter((f) => f.on === false).length,
+      hidden: model.features.filter((f) => f.hidden === true).length,
+      timed: model.features.filter((f) => f.schedule?.enabled === true).length,
+      closed: model.features.filter((f) => f.closed === true).length,
+      restricted: model.features.filter((f) => f.minRole && f.minRole !== 'mod').length,
+      gamesOff: model.games.filter((g) => g.on === false).length,
+      gamesHidden: model.games.filter((g) => g.hidden === true).length,
+      gamesRestricted: model.games.filter((g) => g.minRole && g.minRole !== 'mod').length,
+    };
+    const c = model.counts;
+    summary.textContent = `${model.features.length} features (${c.off} off, ${c.hidden} hidden, ${c.timed} scheduled${c.closed ? `, ${c.closed} closed now` : ''}${c.restricted ? `, ${c.restricted} role-kept` : ''}) · ${model.games.length} games (${c.gamesOff} off, ${c.gamesHidden} hidden${c.gamesRestricted ? `, ${c.gamesRestricted} role-kept` : ''})`;
+  };
+
+  /** Post one switch change, mirror the answer into the model, repaint. */
+  async function save(path, body, mirror) {
+    const res = await adminPost(path, body);
+    if (!res) return null;
+    mirror(res);
+    if (res.config) setServerConfig(res.config);
+    paint();
+    toast('Saved - live for everyone now', 'good');
+    return res;
+  }  /**
+   * The keep-floor picker: the lowest role that still gets this feature while
+   * it is off or hidden.  The rungs come from the server's own ladder, so the
+   * panel cannot offer one the server would not honour.
+   */
+  function keepPicker(item, apply) {
+    const select = el('select', { class: 'input keep-role' });
+    for (const role of model.keepRoles || []) select.appendChild(el('option', { value: role.id, text: role.label }));
+    select.value = item.minRole || 'mod';
+    select.addEventListener('change', () => apply({ minRole: select.value }));
+    return el('label', { class: 'keep-picker', title: 'Who still gets this feature while it is off or hidden' },
+      el('span', { text: 'Kept for' }), select);
+  }
+
+  /** "off for players" / "off except VIP+" - who an off switch actually shuts out. */
+  function keepBadge(item) {
+    switch (item.minRole) {
+      case 'user': return 'off for guests';
+      case 'vip': return 'off except VIP+';
+      case 'admin': return 'off except admins';
+      case 'owner': return 'off except the owner';
+      default: return 'off for players';
+    }
+  }
+
+  /**
+   * One row: what it is, what it hides, and the two switches plus its
+   * keep-floor.  `extra` is one more control some rows grow (a feature's
+   * schedule button); `badges` are the pills only that row's state produces.
+   */
+  function toggleRow(item, { icon, label, desc, note, badges = [], keep = null, extra = null }, apply) {
+    const on = el('input', { type: 'checkbox', checked: item.on !== false });
+    const hidden = el('input', { type: 'checkbox', checked: item.hidden === true });
+    on.addEventListener('change', () => apply({ on: on.checked }));
+    hidden.addEventListener('change', () => apply({ hidden: hidden.checked }));
+
+    const shut = item.on === false || item.closed === true;
+    return el('div', { class: `feature-row${shut ? ' off' : ''}` },
+      el('div', { class: 'feature-main' },
+        el('div', { class: 'row' },
+          el('span', { class: 'icon', text: icon }),
+          el('strong', { text: label }),
+          item.closed === true ? pill('closed by schedule', 'danger') : null,
+          item.on === false ? pill(keepBadge(item), 'danger') : null,
+          item.hidden === true ? pill('hidden 👁', 'warn') : null,
+          item.enforced === false ? pill('display only', 'warn') : null,
+          ...badges,
+        ),
+        el('div', { class: 'muted small', text: desc }),
+        note ? el('div', { class: 'muted small', text: note }) : null,
+      ),
+      el('div', { class: 'feature-switches' },
+        el('label', { class: 'mini-toggle', title: 'Serve this feature to players' }, on, el('span', { text: 'On' })),
+        el('label', { class: 'mini-toggle', title: 'Keep it working, drop it from player navigation' }, hidden, el('span', { text: 'Hidden' })),
+        keep,
+        extra,
+      ),
+    );
+  }
+
+  const paint = () => {
+    recount();
+    const q = filter.value.trim().toLowerCase();
+    const match = (text) => !q || text.toLowerCase().includes(q);
+    featureBox.replaceChildren(...model.groups.map((group) => {
+      const rows = model.features.filter((f) => f.group === group && match(`${f.label} ${f.desc} ${f.id}`));
+      if (!rows.length) return null;
+      return el('div', { class: 'feature-group' },
+        el('h4', { text: group }),
+        ...rows.map((f) => {
+          const apply = (patch) => save('/api/admin/features', { id: f.id, ...patch }, (res) => Object.assign(f, res));
+          return toggleRow(f, {
+            icon: f.icon,
+            label: f.label,
+            desc: f.desc,
+            note: `Hides: ${f.hides}`,
+            badges: f.closed ? [pill(`🕒 closed until ${clockLabel(f.nextChange)}`, 'danger')] : [],
+            keep: keepPicker(f, apply),
+            extra: btn(f.schedule?.enabled ? `🕒 ${f.schedule.from}–${f.schedule.to}` : '🕒 Schedule…',
+              () => scheduleDialog(f, save),
+              { cls: 'sm', title: f.schedule?.enabled ? `Closes on ${dayPhrase(f.schedule.days)}` : 'Close this feature automatically at set times' }),
+          }, apply);
+        }));
+    }).filter(Boolean));
+    if (!featureBox.children.length) featureBox.replaceChildren(el('p', { class: 'muted', text: 'No feature matches that filter.' }));
+
+    const games = model.games.filter((g) => match(`${g.name} ${g.id} ${g.category}`));
+    gameBox.replaceChildren(...(games.length
+      ? games.map((g) => {
+          const apply = (patch) => save(`/api/admin/games/${g.id}`, patch, (res) => Object.assign(g, res));
+          return toggleRow(g, {
+            icon: g.icon || '🎮',
+            label: g.name,
+            desc: `${g.category} · ${g.playable ? 'playable' : 'in development'}`,
+            note: 'Hides: the library list - a hidden game still runs from an invite link or a room code',
+            keep: keepPicker(g, apply),
+          }, apply);
+        })
+      : [el('p', { class: 'muted', text: 'No game matches that filter.' })]));
+  };
+
+  filter.addEventListener('input', paint);
+
+  // An open console follows a scheduled window flipping without a reload: the
+  // server pushes the same `config` every other client gets, and the panel
+  // re-reads its own state (closed pills, "closes in..." text) when it arrives.
+  const offConfig = rt.on('config', () => {
+    if (!featureBox.isConnected) return offConfig();
+    load();
+  });
+
+  draw([
+    el('div', { class: 'card' },
+      el('div', { class: 'row spread admin-toolbar' },
+        el('div', { class: 'row' }, filter, btn('↻', () => load(), { cls: 'sm', title: 'Refresh' })),
+        summary,
+      ),
+      el('p', { class: 'muted small', text: 'On = the feature is served; off = the server refuses it below its keep-floor. Hidden = it still works, but navigation drops the link, so only a direct link reaches it. "Kept for" names the lowest role that still gets the feature while it is off or hidden - staff by default, so a switch can never lock you out; raise it to keep a feature for VIPs or admins while players lose it. A scheduled window closes the feature for everyone below the floor. Nothing here needs a restart - every open tab follows along.' }),
+      el('div', { class: 'row' },
+        btn('↺ Turn everything back on', () => confirmDialog('Turn everything back on', 'Every feature and every game goes back to on and shown, any schedule is cleared, and every keep-floor goes back to staff. Players see the full arcade again.', async () => {
+          const jobs = [
+            ...model.features.filter((f) => f.on === false || f.hidden || f.schedule?.enabled || (f.minRole && f.minRole !== 'mod')).map((f) => adminPost('/api/admin/features', { id: f.id, on: true, hidden: false, schedule: null, minRole: 'mod' })),
+            ...model.games.filter((g) => g.on === false || g.hidden || (g.minRole && g.minRole !== 'mod')).map((g) => adminPost(`/api/admin/games/${g.id}`, { on: true, hidden: false, minRole: 'mod' })),
+          ];
+          await Promise.all(jobs);
+          await load();
+          toast('Everything is on and shown again', 'good');
+        }, { yes: 'Turn it all on' }), { cls: 'sm' }),
+      ),
+    ),
+    el('div', { class: 'card' }, el('h3', { text: '🎚️ Features' }), featureBox),
+    el('div', { class: 'card' },
+      el('h3', { text: '🎮 Games' }),
+      el('p', { class: 'muted small', text: 'Off refuses a game for players; hidden keeps it out of the library but a room code or invite link still works.' }),
+      gameBox,
+    ),
+  ]);
+  load();
+}
+
+/* ------------------------------------------------------------------ *
+ * feature schedules
+ * ------------------------------------------------------------------ */
+
+/** Full day names, Sunday first - the schedule format's day numbers. */
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const DAY_SHORT = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+
+/** "22:00" for an ISO boundary stamp, or "?" when there is none. */
+function clockLabel(iso) {
+  const at = iso ? new Date(iso) : null;
+  if (!at || Number.isNaN(at.getTime())) return '?';
+  return at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+/** "every day" / "weekdays" / "Saturday, Sunday" - the human half of a schedule. */
+function dayPhrase(days) {
+  const list = [...new Set(days || [])].sort((a, b) => a - b);
+  if (!list.length) return 'no days';
+  if (list.length === 7) return 'every day';
+  if (list.length === 5 && list.every((d) => d >= 1 && d <= 5)) return 'weekdays';
+  if (list.length === 2 && list.includes(0) && list.includes(6)) return 'weekends';
+  return list.map((d) => DAY_NAMES[d]).join(', ');
+}
+
+/**
+ * Editor for one feature's schedule.
+ *
+ * Days are the day a window *opens*: a Friday 22:00-08:00 window runs into
+ * Saturday morning, which the preview line says in plain words.  Saving posts
+ * the whole schedule, so the switch / hidden checkboxes above are never
+ * touched by this dialog; "Clear schedule" removes it entirely.
+ */
+function scheduleDialog(f, save) {
+  const stored = f.schedule || {};
+  const draft = {
+    days: [...(stored.days || [0, 1, 2, 3, 4, 5, 6])],
+    from: String(stored.from || '22:00').slice(0, 5),
+    to: String(stored.to || '08:00').slice(0, 5),
+  };
+  const enabled = el('input', { type: 'checkbox', checked: stored.enabled === true, onChange: paint });
+  const from = el('input', { class: 'input', type: 'time', step: 60, value: draft.from, disabled: !draft.enabled, onChange: paint });
+  const to = el('input', { class: 'input', type: 'time', step: 60, value: draft.to, disabled: !draft.enabled, onChange: paint });
+  const preview = el('p', { class: 'muted small' });
+  const chips = DAY_NAMES.map((name, day) => el('button', {
+    class: 'day-chip', type: 'button', text: DAY_SHORT[day], title: name,
+    onClick: () => {
+      const at = draft.days.indexOf(day);
+      if (at === -1) draft.days.push(day);
+      else draft.days.splice(at, 1);
+      paint();
+    },
+  }));
+
+  function paint() {
+    for (const [day, chip] of chips.entries()) chip.classList.toggle('on', draft.days.includes(day));
+    from.disabled = to.disabled = !enabled.checked;
+    const on = enabled.checked;
+    if (!on) {
+      preview.textContent = f.hasSchedule
+        ? 'Schedule off - the times below are kept, it just will not close anything until you switch it back on.'
+        : 'No schedule: only the On switch above closes this feature.';
+      return;
+    }
+    if (!draft.days.length) {
+      preview.textContent = 'Pick at least one day, or switch the schedule off.';
+      return;
+    }
+    const overnight = from.value && to.value && from.value > to.value;
+    preview.textContent = `Closes ${from.value || '??:??'} → ${to.value || '??:??'} (${dayPhrase(draft.days)})${overnight ? ' — runs over midnight, so the closing day is the one that opens the window.' : ''}`;
+  }
+
+  const submit = async () => {
+    if (!from.value || !to.value) return toast('Give the schedule a start and end time.', 'warn');
+    if (enabled.checked && !draft.days.length) return toast('Pick at least one day, or switch the schedule off.', 'warn');
+    const posted = await save('/api/admin/features', {
+      id: f.id,
+      schedule: { enabled: enabled.checked, days: [...draft.days].sort((a, b) => a - b), from: from.value, to: to.value },
+    }, (res) => Object.assign(f, res));
+    if (posted) handle.close();
+  };
+
+  const handle = modal(`🕒 ${f.icon || ''} ${f.label} - schedule`,
+    el('div', { class: 'col' },
+      f.closed ? el('div', { class: 'row' }, pill(`closed right now until ${clockLabel(f.nextChange)}`, 'danger')) : null,
+      el('p', { class: 'muted', text: 'Close this feature automatically inside a window, and reopen it when the window ends. The On/Hidden switches above keep working: a feature switched off stays off all day.' }),
+      el('label', { class: 'row' }, enabled, el('span', { text: 'Close on a schedule' })),
+      el('div', { class: 'row' }, el('span', { class: 'muted small', text: 'Days' }), el('div', { class: 'day-chips' }, chips)),
+      el('div', { class: 'row' },
+        el('label', { class: 'row' }, 'Closes at', from),
+        el('label', { class: 'row' }, 'Reopens at', to)),
+      preview,
+      el('div', { class: 'row' },
+        btn('Save schedule', submit, { variant: 'primary' }),
+        f.hasSchedule ? btn('Clear schedule', async () => {
+          const posted = await save('/api/admin/features', { id: f.id, schedule: null }, (res) => Object.assign(f, res));
+          if (posted) handle.close();
+        }, { cls: 'sm' }) : null,
+        btn('Cancel', () => handle.close(), { cls: 'sm' })),
+    ));
+  paint();
 }
 
 function toggle(label, checked, onChange) {

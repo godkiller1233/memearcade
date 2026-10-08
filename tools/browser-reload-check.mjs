@@ -190,6 +190,9 @@ async function startServer() {
       // watch a member actually fall off.  The room grace stays at its default
       // (20s), which the host-outage countdown check depends on.
       MEMES_PARTY_GRACE_MS: '1500',
+      // Schedules are checked live: a window a few seconds out must open and
+      // close on the production sweep, not wait 20s for it.
+      MEMES_SCHEDULE_TICK_MS: '500',
       // Only this child sees the nonce, and it prints it in the banner it emits
       // after listen() succeeds. A banner carrying it is proof this process,
       // not an orphan, bound the port.
@@ -251,7 +254,7 @@ async function startServer() {
  * Without MEMES_ADMIN_PASS a target run cannot remove what it wrote (and says
  * so on the way out rather than pretending otherwise).
  */
-const TARGET_WRITES = { accounts: [], reports: [], ownerToken: '' };
+const TARGET_WRITES = { accounts: [], reports: [], features: [], ownerToken: '' };
 
 async function cleanupTarget() {
   if (!TARGET) return;
@@ -293,6 +296,13 @@ async function cleanupTarget() {
   }
 
   // Accounts last: the report records and room hosts above name them.
+  // Feature switches the run flipped and did not restore itself - including
+  // any schedule and any keep-floor, which a plain on:true would leave behind
+  // on the target.
+  for (const id of TARGET_WRITES.features) {
+    await adminPost('/api/admin/features', { id, on: true, hidden: false, schedule: null, minRole: 'mod' });
+  }
+
   for (const account of TARGET_WRITES.accounts) {
     if (!account.id) continue;
     await adminPost(`/api/admin/users/${account.id}`, { op: 'delete', reason: 'browser-reload-check cleanup' });
@@ -314,6 +324,13 @@ async function cleanupTarget() {
   const reportsLeft = await json('/api/admin/reports?status=all&limit=200', { headers: auth });
   for (const report of reportsLeft?.reports || []) {
     if (TARGET_WRITES.reports.includes(report.text)) stragglers.push(`report ${report.id}`);
+  }
+  const flagsLeft = await json('/api/admin/features', { headers: auth });
+  for (const feature of flagsLeft?.features || []) {
+    if (TARGET_WRITES.features.includes(feature.id)
+      && (feature.on === false || feature.hidden === true || (feature.minRole && feature.minRole !== 'mod'))) {
+      stragglers.push(`feature ${feature.id} left off, hidden or role-kept`);
+    }
   }
 
   check(stragglers.length === 0,
@@ -1041,8 +1058,9 @@ async function runRegressionChecks() {
   // The moderator's console, exercised for real: the panel lists exactly
   // Players, Rooms and Reports - never an owner-only tab or action the server
   // would refuse - and a player's report is resolved end-to-end through the
-  // Reports tab. The owner's counterpart then shows the full eight-tab panel
-  // and the Broadcast action. Needs the owner account: scratch runs seeded one
+  // Reports tab. The owner's counterpart then shows the full nine-tab panel
+  // and the Broadcast action, and a switch flipped there has to reach a player's
+  // browser. Needs the owner account: scratch runs seeded one
   // above; a target needs MEMES_ADMIN_PASS in the environment, otherwise both
   // are skipped.
   const adminPass = process.env.MEMES_ADMIN_PASS || (TARGET ? '' : SCRATCH_ADMIN_PASS);
@@ -1223,8 +1241,8 @@ async function runRegressionChecks() {
         await until(`document.querySelector('.admin-tabs')`, 'the owner admin panel');
 
         const tabs = await evaluate(`[...document.querySelectorAll('.admin-tabs button')].map((b) => b.textContent.trim())`);
-        const want = ['📊 Overview', '👥 Players', '🎛️ Site', '🎮 Rooms', '📨 Reports', '💡 Ideas', '📜 Audit', '🤖 Discord bot'];
-        check(JSON.stringify(tabs) === JSON.stringify(want), 'the owner panel lists all eight tabs', JSON.stringify(tabs));
+        const want = ['📊 Overview', '👥 Players', '🎛️ Site', '🎚️ Features', '🎮 Rooms', '📨 Reports', '💡 Ideas', '📜 Audit', '🤖 Discord bot'];
+        check(JSON.stringify(tabs) === JSON.stringify(want), 'the owner panel lists all nine tabs', JSON.stringify(tabs));
 
         const head = await evaluate(`(() => { const card = document.querySelector('.admin-tabs')?.closest('.card'); return card ? { text: card.textContent, buttons: [...card.querySelectorAll('button')].map((b) => b.textContent.trim()) } : null; })()`);
         check(!!head && head.text.includes('owner/admin') && !head.text.includes('moderator') && head.buttons.some((t) => t.includes('Broadcast')),
@@ -1260,7 +1278,7 @@ async function runRegressionChecks() {
         }
 
         const problems = [];
-        for (const id of ['overview', 'players', 'site', 'rooms', 'reports', 'ideas', 'audit', 'bot']) {
+        for (const id of ['overview', 'players', 'site', 'features', 'rooms', 'reports', 'ideas', 'audit', 'bot']) {
           await evaluate(`(() => { document.querySelector('.admin-tabs .tab-${id}').click(); return true; })()`);
           try {
             await until(`(() => { const b = document.querySelector('#admin-body'); return !!b && !b.textContent.includes('Loading…'); })()`, `the ${id} tab to draw`, 12000);
@@ -1271,9 +1289,190 @@ async function runRegressionChecks() {
           const drawn = await evaluate(`(() => { const b = document.querySelector('#admin-body'); return { err: !!b.querySelector('.error'), text: b.textContent.replace(/\\s+/g, ' ').trim().slice(0, 80) }; })()`);
           if (drawn.err) problems.push(`${id}: ${drawn.text}`);
         }
-        check(problems.length === 0, 'every owner tab renders without errors', problems.join('; ') || 'all eight tabs');
+        check(problems.length === 0, 'every owner tab renders without errors', problems.join('; ') || 'all nine tabs');
+
+        // The Features tab's schedule editor, driven like an owner would: open
+        // the Chat row's editor, check the defaults, save a whole-day window
+        // (00:00-00:00 needs no clock wait) and watch the row badge itself,
+        // then clear it from the same dialog.  The clear runs outside the
+        // nesting, so a failure can never leave a schedule ticking behind for
+        // the player checks that follow.
+        const chatRow = `(() => [...document.querySelectorAll('#admin-body .feature-row')].find((r) => r.textContent.includes('Chat channels')))()`;
+        const ownerAuth = { 'content-type': 'application/json', authorization: `Bearer ${owner.token}` };
+        const flipFeature = (body) => fetch(`${BASE}/api/admin/features`, {
+          method: 'POST', headers: ownerAuth, body: JSON.stringify(body),
+        }).then((r) => r.json()).catch(() => null);
+        // Whatever chat's schedule was before this check (a target may have a
+        // real one), so the run can put it back exactly.
+        const preFeatures = await fetch(`${BASE}/api/admin/features`, { headers: { authorization: `Bearer ${owner.token}` } }).then((r) => r.json()).catch(() => null);
+        const chatBefore = (preFeatures?.features || []).find((f) => f.id === 'chat') || null;
+        await evaluate(`(() => { document.querySelector('.admin-tabs .tab-features').click(); return true; })()`);
+        const rowsDrawn = await until(`(() => { const row = ${chatRow}; return !!row && [...row.querySelectorAll('button')].some((b) => b.textContent.includes('Schedule')); })()`, 'the Features rows with their schedule action', 12000).then(() => true).catch(() => false);
+        check(rowsDrawn, 'the console draws a schedule action on a feature row');
+
+        // The keep-floor picker every row carries, driven like an owner would:
+        // the rungs come from the server, the stored value is selected, and
+        // choosing one posts it back.
+        if (rowsDrawn) {
+          const picker = await evaluate(`(() => { const row = ${chatRow}; const sel = row && row.querySelector('.keep-picker select'); return sel ? { value: sel.value, options: [...sel.options].map((o) => o.value) } : null; })()`);
+          check(!!picker && picker.options.join(',') === 'user,vip,mod,admin,owner', 'the console offers the server keep-floor ladder', JSON.stringify(picker));
+          check(picker?.value === (chatBefore?.minRole || 'mod'), 'the picker shows the stored keep-floor', String(picker?.value));
+          const chosen = await until(`(() => { const row = ${chatRow}; const sel = row && row.querySelector('.keep-picker select'); if (!sel) return false; sel.value = 'vip'; sel.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`, 'the keep-floor picker to change', 8000).then(() => true).catch(() => false);
+          const stored = chosen && await until(
+            `fetch('/api/admin/features', { headers: { authorization: 'Bearer ${owner.token}' } }).then((r) => r.json()).then((d) => (d.features || []).find((f) => f.id === 'chat')?.minRole === 'vip')`,
+            'the keep-floor to reach the server', 8000,
+          ).then((v) => v === true).catch(() => false);
+          check(stored, 'choosing a keep-floor posts it to the server');
+
+          // With chat off and kept for VIPs, the row says so; keeping it for
+          // everyone then badges it off for guests only.
+          await flipFeature({ id: 'chat', on: false });
+          const vipBadge = await until(`(() => { const row = ${chatRow}; return !!row && row.textContent.includes('off except VIP+'); })()`, 'the row to badge a VIP keep-floor', 8000).then(() => true).catch(() => false);
+          check(vipBadge, 'a role-kept row badges who still gets the feature');
+          await flipFeature({ id: 'chat', on: false, minRole: 'user' });
+          const guestBadge = await until(`(() => { const row = ${chatRow}; return !!row && row.textContent.includes('off for guests'); })()`, 'the row to badge a players-kept feature', 8000).then(() => true).catch(() => false);
+          check(guestBadge, 'a players-kept row says guests are the ones shut out');
+          await flipFeature({ id: 'chat', on: true, hidden: false, minRole: chatBefore?.minRole || 'mod' });
+          const pickerBack = await until(`(() => { const row = ${chatRow}; const sel = row && row.querySelector('.keep-picker select'); return !!sel && sel.value === '${chatBefore?.minRole || 'mod'}'; })()`, 'the picker to follow the restored floor', 8000).then(() => true).catch(() => false);
+          check(pickerBack, 'the row follows the keep-floor back when it is restored');
+        }
+        if (rowsDrawn) {
+          // Every click retries while the panel rebinds: each save pushes a
+          // config frame, which redraws the console underneath the check.
+          // The row's one button is the schedule action; after a save its label
+          // is the window ("🕒 00:00–00:00"), so match the position, not the text.
+          const openEditor = async (label) => until(`(() => { const row = ${chatRow}; if (!row) return false; const b = row.querySelector('.feature-switches button'); if (!b) return false; b.click(); return true; })()`, label, 8000).then(() => true).catch(() => false);
+          const opened = await openEditor('the schedule editor to open');
+          const editorOpen = opened && await until(`document.querySelector('#modal-card .day-chips .day-chip')`, 'the schedule editor to draw', 8000).then(() => true).catch(() => false);
+          check(editorOpen, 'the schedule editor opens with its day chips');
+          if (editorOpen) {
+            const painted = await evaluate(`(() => { const chips = [...document.querySelectorAll('#modal-card .day-chip')]; const times = [...document.querySelectorAll('#modal-card input[type="time"]')]; return { chips: chips.length, on: chips.filter((c) => c.classList.contains('on')).length, times: times.map((t) => t.value) }; })()`);
+            check(painted.chips === 7 && painted.on >= 1 && painted.times.length === 2, 'the editor offers seven day chips and both times', JSON.stringify(painted));
+            await evaluate(`(() => {
+              const times = [...document.querySelectorAll('#modal-card input[type="time"]')];
+              const set = (input, value) => { input.value = value; input.dispatchEvent(new Event('change', { bubbles: true })); };
+              const box = document.querySelector('#modal-card input[type="checkbox"]');
+              if (box && !box.checked) box.click();
+              for (const chip of document.querySelectorAll('#modal-card .day-chip')) if (!chip.classList.contains('on')) chip.click();
+              set(times[0], '00:00'); set(times[1], '00:00');
+              return true;
+            })()`);
+            const saved = await until(`(() => { const b = [...document.querySelectorAll('#modal-card button')].find((x) => x.textContent.trim() === 'Save schedule'); if (!b) return false; b.click(); return true; })()`, 'the Save schedule action', 8000).then(() => true).catch(() => false);
+            check(saved, 'the editor saves the schedule');
+            const badged = await until(`(() => { const row = ${chatRow}; return !!row && row.textContent.includes('closed by schedule'); })()`, 'the row to badge its scheduled close', 8000).then(() => true).catch(() => false);
+            check(badged, 'saving a schedule badges the row as closed');
+
+            const reopenedEditor = await openEditor('the schedule button to reopen the editor');
+            check(reopenedEditor, 'a saved schedule reopens its editor');
+            const clearable = await until(`(() => { const b = [...document.querySelectorAll('#modal-card button')].find((x) => x.textContent.trim() === 'Clear schedule'); if (!b) return false; b.click(); return true; })()`, 'the Clear schedule action', 8000).then(() => true).catch(() => false);
+            check(clearable, 'a stored schedule offers Clear schedule in the editor');
+            const unbadged = await until(`(() => { const row = ${chatRow}; return !!row && !row.textContent.includes('closed by schedule'); })()`, 'the row badge to clear', 8000).then(() => true).catch(() => false);
+            check(unbadged, 'clearing the schedule removes the badge');
+          }
+          await fetch(`${BASE}/api/admin/features`, { method: 'POST', headers: ownerAuth, body: JSON.stringify({ id: 'chat', schedule: chatBefore?.hasSchedule ? chatBefore.schedule : null, minRole: chatBefore?.minRole || 'mod' }) }).catch(() => null);
+        }
       } catch (err) {
         check(false, 'the owner admin panel opens', err.message);
+      }
+    }
+
+    // A switch flipped in the console has to reach a player's browser: the tab
+    // disappears, a deep link shows the polite door instead of a refusal, and
+    // restoring the switch brings the tab back live - no reload anywhere.
+    if (owner?.token) {
+      console.log('\nFeature switches reaching a player…');
+      const ownerAuth = { 'content-type': 'application/json', authorization: `Bearer ${owner.token}` };
+      const flip = (body) => fetch(`${BASE}/api/admin/features`, { method: 'POST', headers: ownerAuth, body: JSON.stringify(body) }).then((r) => r.json()).catch(() => null);
+      try {
+        TARGET_WRITES.features.push('chat', 'changelog');
+        // Chat's keep-floor before this run, so a target with a real one is put
+        // back exactly (scratch runs find the staff default).
+        const chatPre = (await fetch(`${BASE}/api/admin/features`, { headers: { authorization: `Bearer ${owner.token}` } }).then((r) => r.json()).catch(() => null))?.features?.find((f) => f.id === 'chat') || null;
+        const chatFloor = chatPre?.minRole || 'mod';
+        const player = await (await fetch(`${BASE}/api/auth/login`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name, password: 'browser-pass-2026' }),
+        })).json();
+        if (!player?.token) throw new Error('the player account could not sign in for the switch check');
+
+        await flip({ id: 'chat', on: false });
+        await flip({ id: 'changelog', hidden: true });
+        await seedStoredState({ token: player.token, view: 'home' });
+        await cdp.send('Page.navigate', { url: `${BASE}/` }, session);
+        await until(`!!document.querySelector('.nav [data-feature="chat"]') && !document.querySelector('#app').classList.contains('hidden')`, 'the player app shell', 25000);
+
+        const flags = Object.fromEntries((await evaluate(`[...document.querySelectorAll('.nav [data-feature]')].map((t) => [t.dataset.feature, t.classList.contains('hidden')])`)));
+        check(flags.chat === true, 'a switched-off feature leaves the player navigation', JSON.stringify(flags));
+        check(flags.changelog === true, 'a hidden feature leaves the player navigation', JSON.stringify(flags));
+        check(flags.friends === false && flags.downloads === false, 'untouched features keep their tab', JSON.stringify(flags));
+
+        await evaluate(`(() => { window.__setView('chat'); return true; })()`);
+        await until(`(document.querySelector('#view') || {}).textContent?.includes('Turned off')`, 'the turned-off card for the player', 8000);
+        const card = await evaluate(`document.querySelector('#view').textContent.replace(/\\s+/g, ' ').trim().slice(0, 80)`);
+        check(/Chat has been switched off/.test(card), 'a deep link shows the turned-off card, not a refusal', card);
+
+        await flip({ id: 'chat', on: true, hidden: false });
+        await flip({ id: 'changelog', on: true, hidden: false });
+        const back = await until(`(() => { const tab = document.querySelector('.nav [data-feature="chat"]'); return !!tab && !tab.classList.contains('hidden'); })()`, 'the chat tab to return once the switch is back on', 10000).then(() => true).catch(() => false);
+        check(back, 'restoring a switch brings the tab back without a reload');
+
+        // Role keep-floors, seen from the player's own tab: the player's account
+        // is a plain user, so chat switched off but kept for players stays with
+        // them, raising the floor to VIP takes the tab away live, and lowering
+        // it brings the tab back - no reload anywhere.  The deep link then says
+        // who the feature is kept for instead of blaming a plain switch.
+        console.log('\nRole keep-floors reaching a player…');
+        await flip({ id: 'chat', on: false, minRole: 'user' });
+        const keptForPlayers = await until(`(() => { const t = document.querySelector('.nav [data-feature="chat"]'); return !!t && !t.classList.contains('hidden'); })()`, 'the chat tab to stay while the switch is off but kept for players', 10000).then(() => true).catch(() => false);
+        check(keptForPlayers, 'a feature kept for players stays for a player while it is off');
+        await flip({ id: 'chat', minRole: 'vip' });
+        const raised = await until(`(() => { const t = document.querySelector('.nav [data-feature="chat"]'); return !!t && t.classList.contains('hidden'); })()`, 'the chat tab to leave when the keep-floor rises', 10000).then(() => true).catch(() => false);
+        check(raised, 'raising the keep-floor above the player takes the tab away live');
+        await evaluate(`(() => { window.__setView('home'); return true; })()`);
+        await evaluate(`(() => { window.__setView('chat'); return true; })()`);
+        const keptCard = await until(`(document.querySelector('#view') || {}).textContent?.includes('kept for VIPs')`, 'the kept-for card on the player deep link', 8000)
+          .then(() => evaluate(`document.querySelector('#view').textContent.replace(/\\s+/g, ' ').trim().slice(0, 120)`)).catch(() => '');
+        check(/kept for VIPs/.test(keptCard), 'the deep link names the role the feature is kept for', keptCard);
+        await flip({ id: 'chat', minRole: 'user' });
+        const lowered = await until(`(() => { const t = document.querySelector('.nav [data-feature="chat"]'); return !!t && !t.classList.contains('hidden'); })()`, 'the chat tab to come back when the keep-floor drops', 10000).then(() => true).catch(() => false);
+        check(lowered, 'lowering the keep-floor back brings the tab without a reload');
+        // Back to the stored floor before the schedule checks, which speak for
+        // every viewer (the loop below and the target cleanup restore the rest).
+        await flip({ id: 'chat', on: true, hidden: false, minRole: chatFloor });
+        const floorReset = await until(`(() => { const t = document.querySelector('.nav [data-feature="chat"]'); return !!t && !t.classList.contains('hidden'); })()`, 'the chat tab after the keep-floor is restored', 10000).then(() => true).catch(() => false);
+        check(floorReset, 'restoring the keep-floor leaves the player with the tab');
+
+        // A schedule closes chat on its own. 00:00-00:00 is the whole day, so
+        // this window is open in any timezone (a target included) and needs no
+        // clock wait: the player's tab must lose Chat and the deep link must
+        // say when it comes back, with no reload anywhere.
+        console.log('\nScheduled switches reaching a player…');
+        await flip({ id: 'chat', schedule: { enabled: true, days: [0, 1, 2, 3, 4, 5, 6], from: '00:00', to: '00:00' } });
+        const scheduledAway = await until(`(() => { const t = document.querySelector('.nav [data-feature="chat"]'); return !!t && t.classList.contains('hidden'); })()`, 'the chat tab to leave the player during its scheduled window', 10000).then(() => true).catch(() => false);
+        check(scheduledAway, 'a scheduled close hides the player navigation without a reload');
+        await evaluate(`(() => { window.__setView('chat'); return true; })()`);
+        const scheduledCard = await until(`(document.querySelector('#view') || {}).textContent?.includes('closed until')`, 'the scheduled closed card for the player', 8000)
+          .then(() => evaluate(`document.querySelector('#view').textContent.replace(/\\s+/g, ' ').trim().slice(0, 140)`)).catch(() => '');
+        check(/closed until/i.test(scheduledCard) && /scheduled these hours/.test(scheduledCard), 'the deep link says when the feature comes back', scheduledCard);
+
+        // On the scratch server the whole cycle is watched live: a window a few
+        // seconds out must hide the tab when it opens and bring it back when it
+        // ends - the player never asked for anything.
+        if (!TARGET) {
+          const clockOf = (t) => new Date(t).toTimeString().slice(0, 8);
+          await flip({ id: 'chat', schedule: { enabled: true, days: [0, 1, 2, 3, 4, 5, 6], from: clockOf(Date.now() + 3000), to: clockOf(Date.now() + 12000) } });
+          const closedLive = await until(`(() => { const t = document.querySelector('.nav [data-feature="chat"]'); return !!t && t.classList.contains('hidden'); })()`, 'the tab to disappear when the window opens', 20000).then(() => true).catch(() => false);
+          const reopenedLive = await until(`(() => { const t = document.querySelector('.nav [data-feature="chat"]'); return !!t && !t.classList.contains('hidden'); })()`, 'the tab to return when the window ends', 20000).then(() => true).catch(() => false);
+          check(closedLive && reopenedLive, 'the arcade closes and reopens the tab at the scheduled times');
+        }
+
+        await flip({ id: 'chat', on: true, hidden: false, schedule: null, minRole: 'mod' });
+        const clearedSchedule = await until(`(() => { const t = document.querySelector('.nav [data-feature="chat"]'); return !!t && !t.classList.contains('hidden'); })()`, 'the chat tab after the schedule is cleared', 10000).then(() => true).catch(() => false);
+        check(clearedSchedule, 'clearing the schedule brings the tab back');
+      } catch (err) {
+        check(false, 'the feature-switch checks', err.message);
+        await flip({ id: 'chat', on: true, hidden: false, schedule: null, minRole: 'mod' });
+        await flip({ id: 'changelog', on: true, hidden: false, schedule: null, minRole: 'mod' });
       }
     }
   }

@@ -6,7 +6,8 @@
 import { $, el, clear, btn, pill, avatar, toast, modal, fmtNum } from './dom.js';
 import {
   state, loadLocal, saveLocal, applyTheme, cycleTheme, notify, onChange, setSettings,
-  setMe, merge, isStaff, isAdmin, resetClientState, CLIENT_VERSION,
+  setMe, merge, isStaff, isAdmin, resetClientState, setServerConfig, featureOn, featureHidden, featureRaw,
+  CLIENT_VERSION,
 } from './store.js';
 import { api, fetchMeta, restoreSession, login, register, guest, logout, loadCatalog, isSignedIn } from './api.js';
 import { rt, sendChat, addBot, startRoom } from './realtime.js';
@@ -31,7 +32,7 @@ async function boot() {
     detail.textContent = `${meta.counts?.playable ?? 0} games playable · ${meta.counts?.registered ?? 0} accounts · ${meta.counts?.online ?? 0} online`;
     state.catalog = meta.catalog || [];
     state.categories = [...new Set(state.catalog.map((g) => g.category))];
-    if (meta.config) state.serverConfig = meta.config;
+    setServerConfig(meta.config);
     const restoreNote = document.createElement('div');
     restoreNote.className = 'muted small';
     restoreNote.textContent = meta.degraded?.length ? `Compatibility: ${meta.degraded.join(', ')}` : 'Compatibility: full';
@@ -150,6 +151,32 @@ function startApp() {
 /** Views that subscribe to idea-board pings (the changelog shares them). */
 const BOARD_VIEWS = new Set(['suggestions', 'changelog']);
 
+/**
+ * Which feature owns a view.  Only these views are ever gated: a player whose
+ * arcade has the feature switched off sees the nav entry disappear (see
+ * renderApp) and a "turned off" card if they reach the view through a deep
+ * link, instead of a screen the server would refuse to fill.
+ */
+const VIEW_FEATURE = {
+  catalog: 'catalog',
+  lobby: 'lobby',
+  chat: 'chat',
+  friends: 'friends',
+  suggestions: 'suggestions',
+  changelog: 'changelog',
+  download: 'downloads',
+};
+
+const VIEW_LABEL = {
+  catalog: 'The game library',
+  lobby: 'The lobby',
+  chat: 'Chat',
+  friends: 'Friends',
+  suggestions: 'The idea board',
+  changelog: 'The changelog',
+  download: 'Desktop downloads',
+};
+
 export function setView(name) {
   // Stop the idea-board pings once we leave those views (the socket is shared).
   if (BOARD_VIEWS.has(state.view) && !BOARD_VIEWS.has(name)) rt.send({ t: 'suggestions', watching: false });
@@ -171,12 +198,15 @@ export function renderApp() {
     tab.classList.toggle('on', tab.dataset.view === state.view);
     tab.onclick = () => setView(tab.dataset.view);
   });
+  // Hiding is per-viewer (staff keep every tab), so it is applied here rather
+  // than baked into the markup.  Anything marked data-feature in index.html -
+  // nav tabs, sidebar blocks, the music button - follows its switch.
+  document.querySelectorAll('[data-feature]').forEach((node) => {
+    node.classList.toggle('hidden', featureHidden(node.dataset.feature));
+  });
   $('.admin-only')?.classList.toggle('hidden', !isStaff());
   refreshAdminBadge();
-  const ann = $('#announcement');
-  const text = state.serverConfig?.announcement;
-  ann.classList.toggle('hidden', !text);
-  if (text) ann.textContent = `📣 ${text}`;
+  drawAnnouncement();
 
   renderStatus();
   $('#status-version').textContent = `v${CLIENT_VERSION} / api v${state.server?.apiVersion ?? '?'}`;
@@ -197,7 +227,11 @@ export function renderApp() {
     clear(view);
   }
   const target = state.view === 'play' ? 'play' : state.view;
-  if (!keepGame) (views[target] || views.home)(view);
+  const owner = VIEW_FEATURE[target];
+  if (!keepGame) {
+    if (owner && !featureOn(owner)) view.appendChild(turnedOffCard(owner));
+    else (views[target] || views.home)(view);
+  }
   renderSidebar();
   $('#nav-toggle').onclick = () => $('.nav.tabs')?.classList.toggle('open');
   $('#theme-toggle').onclick = () => { const t = cycleTheme(); toast(`Theme: ${t}`, '', 1500); };
@@ -207,6 +241,43 @@ export function renderApp() {
     setSettings({ audio: { music: on } }, { persist: false });
   };
   $('#music-toggle').textContent = state.settings.audio.music ? '🔊' : '🔇';
+}
+
+/**
+ * The announcement banner: pushed by broadcasts and site settings, and the one
+ * config change that never needs the shell rebuilt.
+ */
+function drawAnnouncement() {
+  const ann = $('#announcement');
+  const text = state.serverConfig?.announcement;
+  ann.classList.toggle('hidden', !text);
+  if (text) ann.textContent = `📣 ${text}`;
+}
+
+/** Who a keep-floor keeps, in a player's words (the server sends the rung). */
+const KEPT_FOR = { user: 'signed-in players', vip: 'VIPs', mod: 'staff', admin: 'admins', owner: 'the arcade owner' };
+
+/** The polite door for a switched-off feature reached by deep link. */
+function turnedOffCard(feature) {
+  const label = VIEW_LABEL[feature] || 'This part of the arcade';
+  // A scheduled close carries the reopen time, so the notice says when it comes
+  // back instead of implying an owner is sitting there with a switch.  A
+  // keep-floor above this account says who *does* still get it, so a player
+  // does not read the arcade as broken while VIPs are using the feature.
+  const raw = featureRaw(feature);
+  const until = raw.scheduled && raw.until ? new Date(raw.until) : null;
+  const opens = until && !Number.isNaN(until.getTime()) ? until.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : null;
+  const kept = raw.minRole && raw.minRole !== 'mod' ? KEPT_FOR[raw.minRole] : null;
+  return el('div', { class: 'card' },
+    el('h1', { text: '🚪 Turned off' }),
+    el('p', { class: 'muted', text: opens
+      ? `${label} is closed until ${opens} - the arcade owner scheduled these hours, and it reopens on its own.`
+      : kept
+        ? `${label} is kept for ${kept} - it is turned off for this account.`
+        : `${label} has been switched off by the arcade owner.` }),
+    el('div', { class: 'row' },
+      btn('Back home', () => setView('home'), { variant: 'primary' }),
+      btn('Games', () => setView('catalog'), { cls: 'sm' })));
 }
 
 /** Status bar: connection dot, the room chip (a real way back into a room
@@ -297,6 +368,7 @@ function inviteDialog() {
 }
 
 export function openDm(userId) {
+  if (!featureOn('dm')) return toast('Direct messages are turned off on this arcade.', 'warn');
   rt.send({ t: 'friend', op: 'history', userId });
   state.chatScope = 'dm';
   state.chatTarget = userId;
@@ -393,7 +465,7 @@ views.play = (mount) => {
       ),
       el('div', { class: 'row' },
         inLobby && isHost ? btn(room.canStart ? 'Start game' : 'Waiting for players', () => startRoom(), { variant: 'primary', disabled: !room.canStart, cls: 'sm' }) : null,
-        inLobby && isHost ? btn('Add bot', () => addBot(2), { cls: 'sm' }) : null,
+        inLobby && isHost && featureOn('bots') ? btn('Add bot', () => addBot(2), { cls: 'sm' }) : null,
         inLobby ? btn('Invite', () => shareRoom(room), { cls: 'sm' }) : null,
         !inLobby ? btn('Rematch', () => {
           if (room) { if (isHost) rt.send({ t: 'room', op: 'rematch' }); }
@@ -424,7 +496,7 @@ views.play = (mount) => {
   } else if (local) mountLocalStage(stage, local);
   else stage.appendChild(el('p', { class: 'muted', text: 'Pick a game to start playing.' }));
 
-  if (room) mount.appendChild(roomChatCard());
+  if (room && featureOn('chat')) mount.appendChild(roomChatCard());
   syncRoomAlert();
 };
 
@@ -604,9 +676,28 @@ function mountOnlineStage(stage = null) {
  * realtime wiring
  * ------------------------------------------------------------------ */
 
+/**
+ * Adopt a config push - the welcome carries one, and the console pushes a fresh
+ * one whenever the site settings, a feature switch or a game's visibility
+ * change.  The shell is only rebuilt when the switches or the catalog really
+ * moved, so an admin is never redrawn mid-keystroke by their own save.
+ */
+function applyConfigPush(msg) {
+  const snapshot = () => JSON.stringify([state.features, (state.catalog || []).map((g) => g.id)]);
+  const before = snapshot();
+  setServerConfig(msg.config);
+  if (msg.catalog?.length) {
+    state.catalog = msg.catalog;
+    state.categories = [...new Set(state.catalog.map((g) => g.category))];
+  }
+  const changed = snapshot() !== before;
+  if (changed && state.me) renderApp();
+  else drawAnnouncement();
+  return changed;
+}
+
 rt.on('welcome', (msg) => {
-  state.serverConfig = msg.config || state.serverConfig;
-  if (msg.catalog?.length) state.catalog = msg.catalog;
+  applyConfigPush(msg);
   if (msg.degraded?.length) toast(`Compatibility note: ${msg.degraded.join(', ')}`, 'warn', 6000);
   // Invite links join on the first welcome: that is the earliest moment the
   // socket is open and the server knows who we are (rt.send drops before then).
@@ -804,6 +895,10 @@ rt.on('suggestions:changed', () => {
   if (state.view === 'suggestions') window.__refetchSuggestions?.();
   if (state.view === 'changelog') window.__refetchChangelog?.();
 });
+
+/* An admin just changed the site settings, a feature switch or a game's
+ * visibility: every open tab follows along without a reload. */
+rt.on('config', (msg) => applyConfigPush(msg));
 
 rt.on('error', (msg) => {
   pendingPartyJoin = null; // the join was refused; do not confirm it later

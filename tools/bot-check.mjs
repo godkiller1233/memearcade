@@ -27,7 +27,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { attachWebSocket } from '../server/lib/ws.js';
 import { Arcade } from '../bot/arcade.js';
-import { arcadeEmbed, profileEmbed, formatChangelog, changelogLine, avatarImageUrl, levelColor } from '../bot/commands.js';
+import { arcadeEmbed, profileEmbed, formatChangelog, changelogLine, avatarImageUrl, levelColor, describeSwitches, featureOffReply } from '../bot/commands.js';
 import { pong } from '../web/games/engines/arcade.js';
 import { stopChild } from './lib/stop-child.mjs';
 
@@ -338,6 +338,9 @@ async function startBot() {
       ARCADE_URL: ARCADE,
       DISCORD_API_BASE: `http://127.0.0.1:${FAKE_PORT}/api/v10`,
       DISCORD_GATEWAY_URL: `ws://127.0.0.1:${FAKE_PORT}/gateway`,
+      // Read the switches afresh for every command: the checks below flip them
+      // and expect the very next interaction to see it.
+      BOT_FEATURE_TTL_MS: '0',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -858,6 +861,97 @@ async function run() {
   } else {
     check(false, 'the live-role ping checks', 'the moderator or poster account above was not ready');
   }
+
+  /* 16. feature switches: the bot is not a second door around a switch. The
+        owner closes the idea board and every board command announces it; a
+        hidden feature keeps serving; a scheduled window names when it reopens;
+        and restoring a switch brings the command straight back. */
+  const switches = (body) => arcade('POST', '/api/admin/features', { token: admin.payload.token, body });
+  const liveFlags = async () => (await arcade('GET', '/api/meta')).payload?.config?.features || {};
+  const replyOf = (msg) => msg.message?.content || '';
+
+  check(botLog.join('').includes('feature switches: everything is on and shown'),
+    'the bot announces the arcade switch state at boot', botLog.join('').split('\n').find((l) => l.includes('feature switches')) || 'no switch line');
+  check(describeSwitches(null).includes('could not be read'),
+    'an unreadable switch map is reported, never treated as all-clear', describeSwitches(null));
+  check(describeSwitches({ suggestions: { on: false }, changelog: { on: true, hidden: true } }) === 'feature switches: 1 off (Idea board) · 1 hidden (Changelog)',
+    'the boot line names exactly what is off and hidden', describeSwitches({ suggestions: { on: false }, changelog: { on: true, hidden: true } }));
+  const scheduledReply = featureOffReply('suggestions', { on: false, scheduled: true, until: '2026-10-09T05:00:00.000Z' });
+  check(scheduledReply.content.includes('Idea board is turned off') && scheduledReply.content.includes('It is on a schedule')
+    && /reopens <t:\d+:R>/.test(scheduledReply.content) && scheduledReply.ephemeral === true,
+    'a scheduled close names the feature and stamps its reopen', scheduledReply.content);
+
+  const boardOff = await switches({ id: 'suggestions', on: false });
+  check(boardOff.ok && boardOff.payload?.on === false, 'the owner switches the idea board off', boardOff.payload?.message);
+  check((await liveFlags()).suggestions?.on === false, 'the switch is live on the arcade');
+
+  const ideasOff = await interact(fanUser, 'ideas', [{ name: 'sort', value: 'top' }]);
+  check(replyOf(ideasOff).includes('Idea board is turned off on this arcade'), '/ideas announces the switched-off idea board', replyOf(ideasOff).slice(0, 120));
+  check(replyOf(ideasOff).includes('The owner switched it off'), '/ideas says who closed it and what to do', replyOf(ideasOff).slice(0, 170));
+  check(!replyOf(ideasOff).includes('Kart racing mini-game'), '/ideas serves no board while it is off');
+  check(!ideasOff.callback?.data?.flags, '/ideas keeps its public reply for the notice');
+
+  const suggestOff = await interact(stranger, 'suggest', [
+    { name: 'title', value: 'Anything at all' },
+    { name: 'details', value: 'This must be refused before the link check asks for anything.' },
+  ]);
+  check(replyOf(suggestOff).includes('Idea board is turned off'), '/suggest announces before asking to link', replyOf(suggestOff).slice(0, 120));
+  check(suggestOff.callback?.data?.flags === 64, '/suggest keeps its private reply for the notice');
+
+  const voteOff = await interact(stranger, 'vote', [{ name: 'idea', value: 'zzzzzzzz' }]);
+  check(replyOf(voteOff).includes('Idea board is turned off'), '/vote announces before it looks the idea up', replyOf(voteOff).slice(0, 120));
+
+  const logWhileBoardOff = await interact(fanUser, 'changelog');
+  check((replyOf(logWhileBoardOff) || '').includes('shipped'), '/changelog keeps serving while only the idea board is off', replyOf(logWhileBoardOff).slice(0, 100));
+
+  // Hidden is not off: the log still answers, and only the boot line says so.
+  await switches({ id: 'changelog', hidden: true });
+  const hiddenLog = await interact(fanUser, 'changelog');
+  check(replyOf(hiddenLog).includes('ideas shipped') && replyOf(hiddenLog).includes('**Changelog**'), 'a hidden feature still serves the bot', replyOf(hiddenLog).slice(0, 110));
+  check(describeSwitches(await liveFlags()).includes('1 hidden (Changelog)'), 'the switch map reports the hidden feature', describeSwitches(await liveFlags()));
+  await switches({ id: 'changelog', hidden: false });
+
+  // Leaderboards: the whole board closes, and the picker goes quiet with it.
+  await switches({ id: 'leaderboard', on: false });
+  const ranksOff = await interact(fanUser, 'leaderboard', []);
+  check(replyOf(ranksOff).includes('Leaderboards is turned off on this arcade'), '/leaderboard announces the closed board', replyOf(ranksOff).slice(0, 120));
+  const gameBoardOff = await interact(fanUser, 'leaderboard', [{ name: 'game', value: 'pong' }]);
+  check(replyOf(gameBoardOff).includes('Leaderboards is turned off'), 'the per-game board announces it too', replyOf(gameBoardOff).slice(0, 120));
+  const offChoices = await pushAutocomplete(fanUser, 'leaderboard', [{ name: 'game', value: 'pin', focused: true }]);
+  check((offChoices.callback?.data?.choices || []).length === 0, 'the game picker offers nothing while leaderboards are off', JSON.stringify(offChoices.callback?.data));
+  const profileWhileOff = await interact(fanUser, 'arcade', [{ name: 'player', value: 'ideafan' }]);
+  check(profileWhileOff.message?.embeds?.[0]?.title === 'ideafan', 'profile lookups keep working while leaderboards are off');
+  await switches({ id: 'leaderboard', on: true });
+
+  // Hiding the game library quiets the picker, exactly like the site's Games
+  // tab - a typed id or name still reaches the board (a deep link still works).
+  await switches({ id: 'catalog', hidden: true });
+  const hiddenChoices = await pushAutocomplete(fanUser, 'leaderboard', [{ name: 'game', value: 'pin', focused: true }]);
+  check((hiddenChoices.callback?.data?.choices || []).length === 0, 'hiding the game library empties the game picker', JSON.stringify(hiddenChoices.callback?.data));
+  const typedGame = await interact(fanUser, 'leaderboard', [{ name: 'game', value: 'ping' }]);
+  check(replyOf(typedGame).includes('Ping Pong'), 'a typed game still reaches its board while the library is hidden', replyOf(typedGame).slice(0, 100));
+  await switches({ id: 'catalog', hidden: false });
+
+  // A schedule never overrides the manual switch: with the board already off,
+  // the notice blames the owner, because the window is not why it is closed.
+  const manualWindow = await switches({ id: 'suggestions', schedule: { enabled: true, days: [0, 1, 2, 3, 4, 5, 6], from: '00:00', to: '00:00' } });
+  check(manualWindow.ok && manualWindow.payload?.on === false && manualWindow.payload?.hasSchedule === true,
+    'a schedule stored beside a manual off is kept', JSON.stringify(manualWindow.payload?.schedule));
+  const stillManual = await interact(fanUser, 'ideas', []);
+  check(replyOf(stillManual).includes('The owner switched it off') && !replyOf(stillManual).includes('It is on a schedule'),
+    'a manually closed board is not blamed on its schedule', replyOf(stillManual).slice(0, 120));
+
+  // Now the window alone closes it: the notice names when it reopens.
+  const scheduled = await switches({ id: 'suggestions', on: true, schedule: { enabled: true, days: [0, 1, 2, 3, 4, 5, 6], from: '00:00', to: '00:00' } });
+  check(scheduled.ok && scheduled.payload?.on === true && scheduled.payload?.closed === true,
+    'the window alone closes the idea board right now', JSON.stringify(scheduled.payload?.schedule));
+  const ideasScheduled = await interact(fanUser, 'ideas', []);
+  check(replyOf(ideasScheduled).includes('It is on a schedule') && /reopens <t:\d+:R>/.test(replyOf(ideasScheduled)),
+    '/ideas names the scheduled reopening', replyOf(ideasScheduled).slice(0, 170));
+  const boardRestored = await switches({ id: 'suggestions', on: true, hidden: false, schedule: null });
+  check(boardRestored.ok && boardRestored.payload?.closed === false && boardRestored.payload?.hasSchedule === false, 'the schedule is cleared again', JSON.stringify(boardRestored.payload?.schedule));
+  const boardBack = await interact(fanUser, 'ideas', [{ name: 'sort', value: 'top' }]);
+  check(replyOf(boardBack).includes('Kart racing mini-game'), 'restoring the switch brings /ideas straight back', replyOf(boardBack).slice(0, 100));
 
   const errored = botLog.join('').includes('failed');
   check(!errored, 'the bot logged no command failures', botLog.filter((l) => l.includes('failed')).slice(0, 2).join(' | '));

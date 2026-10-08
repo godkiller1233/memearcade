@@ -3,7 +3,7 @@
  * cleanups in ctx.onCleanup so switching views tears down timers/hosts.
  */
 import { el, btn, pill, avatar, toast, modal, fmtNum, timeAgo, confirmDialog } from './dom.js';
-import { state, setSettings, isStaff, isAdmin, THEMES, KEYBIND_ACTIONS, setSettings as saveSettings } from './store.js';
+import { state, setSettings, isStaff, isAdmin, featureOn, THEMES, KEYBIND_ACTIONS, setSettings as saveSettings } from './store.js';
 import { api } from './api.js';
 import { rt, partyOp, joinRoom, sendChat } from './realtime.js';
 import { LocalHost, OnlineHost, seatsFor, botSeat } from './host.js';
@@ -72,8 +72,8 @@ views.home = (mount) => {
         const pick = playable[Math.floor(Math.random() * playable.length)];
         if (pick) startSoloGame(pick);
       }, { variant: 'primary' }),
-      btn('🎈 Start a party', () => partyOp('create')),
-      btn('🔎 Browse all games', () => window.__setView('catalog')),
+      featureOn('parties') ? btn('🎈 Start a party', () => partyOp('create')) : null,
+      featureOn('catalog') ? btn('🔎 Browse all games', () => window.__setView('catalog')) : null,
     ),
   ));
 
@@ -95,35 +95,43 @@ views.home = (mount) => {
   mount.appendChild(el('div', { class: 'grid cards' },
     playable.filter((g) => g.minutes <= 12).slice(0, 8).map((g) => gameCard(g, { onPlay: (game) => startSoloGame(game) }))));
 
-  mount.appendChild(el('div', { class: 'card' },
-    el('h3', { text: 'Play with friends' }),
-    el('p', { class: 'muted', text: 'Everyone on this wifi can join with the LAN link printed by the server. Create a party, share the 4-letter code, then hit start.' }),
-    el('div', { class: 'row' },
-      btn('Create party', () => partyOp('create'), { variant: 'primary' }),
-      btn('Join by code', () => promptJoinCode()),
-      btn('Open lobby', () => window.__setView('lobby')),
-    ),
-    window.__lanHint ? el('p', { class: 'mono small', text: window.__lanHint }) : null,
-  ));
+  // Each card follows its own switch, so a home page never advertises a door
+  // the server would refuse to open.
+  if (featureOn('parties')) {
+    mount.appendChild(el('div', { class: 'card' },
+      el('h3', { text: 'Play with friends' }),
+      el('p', { class: 'muted', text: 'Everyone on this wifi can join with the LAN link printed by the server. Create a party, share the 4-letter code, then hit start.' }),
+      el('div', { class: 'row' },
+        btn('Create party', () => partyOp('create'), { variant: 'primary' }),
+        btn('Join by code', () => promptJoinCode()),
+        featureOn('lobby') ? btn('Open lobby', () => window.__setView('lobby')) : null,
+      ),
+      window.__lanHint ? el('p', { class: 'mono small', text: window.__lanHint }) : null,
+    ));
+  }
 
-  mount.appendChild(el('div', { class: 'card' },
-    el('h3', { text: '💡 Got an idea?' }),
-    el('p', { class: 'muted', text: 'Suggest a new game, a feature or an update - and vote on what everyone else wants next.' }),
-    el('div', { class: 'row' },
-      btn('Open the idea board', () => window.__setView('suggestions'), { variant: 'primary' }),
-    ),
-  ));
+  if (featureOn('suggestions')) {
+    mount.appendChild(el('div', { class: 'card' },
+      el('h3', { text: '💡 Got an idea?' }),
+      el('p', { class: 'muted', text: 'Suggest a new game, a feature or an update - and vote on what everyone else wants next.' }),
+      el('div', { class: 'row' },
+        btn('Open the idea board', () => window.__setView('suggestions'), { variant: 'primary' }),
+      ),
+    ));
+  }
 
-  mount.appendChild(el('div', { class: 'card download-hero' },
-    el('span', { class: 'big-icon', text: '⬇️' }),
-    el('div', { style: { flex: '1', minWidth: '220px' } },
-      el('h3', { text: 'Get the desktop app' }),
-      el('p', { class: 'muted', text: 'Desktop Lite is a tiny window around this website. Desktop Host ships every file, so you can host your own games and matches offline or on your wifi.' }),
-    ),
-    el('div', { class: 'row' },
-      btn('Browse downloads', () => window.__setView('download'), { variant: 'primary' }),
-    ),
-  ));
+  if (featureOn('downloads')) {
+    mount.appendChild(el('div', { class: 'card download-hero' },
+      el('span', { class: 'big-icon', text: '⬇️' }),
+      el('div', { style: { flex: '1', minWidth: '220px' } },
+        el('h3', { text: 'Get the desktop app' }),
+        el('p', { class: 'muted', text: 'Desktop Lite is a tiny window around this website. Desktop Host ships every file, so you can host your own games and matches offline or on your wifi.' }),
+      ),
+      el('div', { class: 'row' },
+        btn('Browse downloads', () => window.__setView('download'), { variant: 'primary' }),
+      ),
+    ));
+  }
 };
 
 function stat(label, value) {
@@ -259,7 +267,7 @@ views.lobby = (mount) => {
       ),
       pill(room.code),
       room.status === 'playing'
-        ? btn('Spectate', () => { rt.send({ t: 'room', op: 'spectate', roomId: room.id }); window.__setView('play'); }, { cls: 'sm' })
+        ? (featureOn('spectate') ? btn('Spectate', () => { rt.send({ t: 'room', op: 'spectate', roomId: room.id }); window.__setView('play'); }, { cls: 'sm' }) : pill('spectating off'))
         : btn('Join', () => { state.localGame = null; rt.send({ t: 'room', op: 'join', roomId: room.id }); window.__setView('play'); }, { variant: 'primary', cls: 'sm' }),
     ));
   }
@@ -329,8 +337,8 @@ views.friends = (mount) => {
   mount.appendChild(el('h3', { text: `All friends (${accepted.length})` }));
   if (!accepted.length) mount.appendChild(el('div', { class: 'card muted', text: 'No friends yet - add someone by username above.' }));
   mount.appendChild(el('div', { class: 'col' }, accepted.map((f) => friendRow(f, [
-    btn('DM', () => { window.__openDm(f.id); }, { cls: 'sm' }),
-    btn('Invite', () => { partyOp('invite', { userId: f.id }); toast(`Invited ${f.name}`, 'good'); }, { cls: 'sm' }),
+    featureOn('dm') ? btn('DM', () => { window.__openDm(f.id); }, { cls: 'sm' }) : null,
+    featureOn('parties') ? btn('Invite', () => { partyOp('invite', { userId: f.id }); toast(`Invited ${f.name}`, 'good'); }, { cls: 'sm' }) : null,
     btn('Remove', () => confirmDialog('Remove friend', `Remove ${f.name} from your friends?`, () => rt.send({ t: 'friend', op: 'remove', userId: f.id })), { cls: 'sm' }),
   ]))));
 };
@@ -372,7 +380,7 @@ views.chat = (mount) => {
   const tabs = el('div', { class: 'tabs-list' },
     chatTab('global', 'Global', scope, target),
     chatTab('party', 'Party', scope, target),
-    ...state.conversations.slice(0, 8).map((c) => chatTab('dm', c.name, scope, target, c.userId)),
+    ...(featureOn('dm') ? state.conversations.slice(0, 8).map((c) => chatTab('dm', c.name, scope, target, c.userId)) : []),
   );
 
   const draw = () => {

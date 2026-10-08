@@ -24,6 +24,25 @@ up under your arcade name. Looking someone up (`/arcade player:name`,
 the website's player list shows, and a name that misses offers the closest
 matches.
 
+## Feature switches
+
+The bot honours the same switches as the website (Admin console → 🎚️ Features).
+A command whose feature is switched off - or scheduled off for the night -
+replies with a notice naming the feature instead of serving a closed board:
+
+> 🚪 **Idea board is turned off on this arcade.**
+> It is on a schedule: it reopens *in 4 hours* (10:00 PM).
+
+`/ideas`, `/suggest` and `/vote` need the idea board, `/changelog` needs the
+changelog and `/leaderboard` needs leaderboards; `/arcade`, `/profile` and
+`/link` are profile lookups and keep working. While leaderboards are off, or the
+owner has hidden the game library, `/leaderboard game:` stops offering
+autocomplete choices - a typed game id or name still reaches the board, like a
+deep link on the site. The bot logs the arcade's switch state at boot, and reads
+it again for every command (`BOT_FEATURE_TTL_MS`, default 10 seconds). If that
+read ever fails the command runs anyway and the server's own refusal is the
+reply - the bot can never be more open than the arcade.
+
 ## Setup
 
 1. Create an application at <https://discord.com/developers/applications>, add a
@@ -51,5 +70,8 @@ server restarts).
 `npm run botcheck` boots a scratch arcade plus a fake Discord (REST + gateway,
 using the project's own WebSocket server), runs the real bot against it and
 drives `/arcade`, `/profile`, `/leaderboard`, `/ideas`, `/changelog`, `/suggest`,
-`/vote` and `/link`. It covers our side of the protocol without a Discord
-token; it does not test real Discord itself.
+`/vote` and `/link`. It also closes features as the owner (idea board, changelog,
+leaderboards, one scheduled window) and asserts every affected command answers
+with the switch notice - and that a hidden feature still serves. It covers our
+side of the protocol without a Discord token; it does not test real Discord
+itself.

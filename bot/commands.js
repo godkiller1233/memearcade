@@ -15,7 +15,15 @@
  * `/leaderboard game:` autocompletes from the live catalog (see autocomplete),
  * so players pick a real game instead of guessing its name or id. `/changelog`
  * renders the shipped ideas the site's changelog page shows.
+ *
+ * Every command also respects the owner's feature switches (see COMMAND_FEATURE
+ * and FeatureGate): a feature the arcade has switched off - or scheduled off for
+ * the night - answers with the same notice the website shows instead of serving
+ * a closed board. The switch labels come from shared/features.js, so the bot and
+ * the console can never name a switch differently.
  */
+import { FEATURE_IDS, featureLabel } from '../shared/features.js';
+
 const CATEGORY_ICON = { game: '🎮', feature: '✨', update: '🛠️', other: '💬' };
 const STATUS_ORDER = ['open', 'planned', 'in-progress', 'done', 'declined'];
 const CATEGORY_CHOICES = [
@@ -142,6 +150,105 @@ export class LinkStore {
       if (!token) return { unlinked: true };
       return { value: await fn(token) };
     }
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * feature switches
+ * ------------------------------------------------------------------ */
+
+/** Commands whose replies land in the channel; the rest answer privately. */
+export const PUBLIC_COMMANDS = new Set(['ideas', 'changelog', 'leaderboard']);
+
+/** Which switch each command needs; a command that is not listed needs none. */
+export const COMMAND_FEATURE = {
+  ideas: 'suggestions',
+  suggest: 'suggestions',
+  vote: 'suggestions',
+  changelog: 'changelog',
+  leaderboard: 'leaderboard',
+};
+
+/**
+ * The reply for a command whose feature is switched off: it names the feature
+ * exactly as the admin console does, says whether an owner closed it or a
+ * schedule did, and - for a schedule - when it comes back, as Discord stamps in
+ * the reader's own timezone (<t:...:t> short time, <t:...:R> relative).
+ */
+export function featureOffReply(id, flag = {}, { ephemeral = true } = {}) {
+  const until = flag?.scheduled && flag?.until ? new Date(flag.until) : null;
+  const stamp = until && !Number.isNaN(until.getTime()) ? Math.floor(until.getTime() / 1000) : null;
+  return {
+    content: [
+      `🚪 **${featureLabel(id)} is turned off on this arcade.**`,
+      stamp
+        ? `It is on a schedule: it reopens <t:${stamp}:R> (<t:${stamp}:t>).`
+        : 'The owner switched it off - try again later, or ask an admin to switch it back on.',
+    ].join('\n'),
+    ephemeral,
+  };
+}
+
+/** One line for the boot log, so the operator sees what the arcade has closed. */
+export function describeSwitches(flags) {
+  if (!flags) return 'feature switches: could not be read - commands follow the server instead';
+  const off = FEATURE_IDS.filter((id) => flags[id]?.on === false);
+  const hidden = FEATURE_IDS.filter((id) => flags[id]?.on !== false && flags[id]?.hidden === true);
+  if (!off.length && !hidden.length) return 'feature switches: everything is on and shown';
+  const bits = [];
+  if (off.length) bits.push(`${off.length} off (${off.map(featureLabel).join(', ')})`);
+  if (hidden.length) bits.push(`${hidden.length} hidden (${hidden.map(featureLabel).join(', ')})`);
+  const closed = off.filter((id) => flags[id]?.scheduled === true);
+  if (closed.length) bits.push(`closed by a schedule right now: ${closed.map(featureLabel).join(', ')}`);
+  return `feature switches: ${bits.join(' · ')}`;
+}
+
+/**
+ * Reads the arcade's switch map and caches it briefly, because every command
+ * asks.  A read that fails or times out answers "no flags", never "all clear":
+ * the command then runs and the server's own refusal (the same 403 the website
+ * gets) becomes the reply, so a hiccup can never leave the bot more permissive
+ * than the arcade it talks to.
+ */
+export class FeatureGate {
+  constructor(arcade, { ttlMs = 10000, timeoutMs = 1200, now = () => Date.now() } = {}) {
+    this.arcade = arcade;
+    this.ttlMs = Math.max(0, Number(ttlMs) || 0);
+    this.timeoutMs = timeoutMs;
+    this.now = now;
+    this.cached = null; // { at, flags }
+    this.inFlight = null;
+  }
+
+  /** The switch map, or null when it could not be read. */
+  async flags() {
+    if (this.cached && this.now() - this.cached.at < this.ttlMs) return this.cached.flags;
+    if (this.inFlight) return this.inFlight;
+    this.inFlight = this.arcade
+      .meta({ timeoutMs: this.timeoutMs })
+      .then((res) => {
+        const flags = res?.config?.features || null;
+        if (flags) this.cached = { at: this.now(), flags };
+        return flags;
+      })
+      .catch(() => null)
+      .finally(() => {
+        this.inFlight = null;
+      });
+    return this.inFlight;
+  }
+
+  /** The stored flag when this feature is switched off for players, else null. */
+  async off(id) {
+    const flags = await this.flags();
+    return flags?.[id]?.on === false ? flags[id] : null;
+  }
+
+  /** True when a switch keeps this unadvertised: switched off, or hidden. */
+  async hiddenOrOff(id) {
+    const flags = await this.flags();
+    const flag = flags?.[id];
+    return !!flag && (flag.on === false || flag.hidden === true);
   }
 }
 
@@ -416,7 +523,15 @@ const UNLINKED_REPLY = [
  */
 export async function runCommand(name, rawOptions, ctx) {
   const options = optionsToObject(rawOptions);
-  const { arcade, links, user } = ctx;
+  const { arcade, links, user, features } = ctx;
+
+  // A switched-off feature answers with the same notice the website shows,
+  // before any validation or lookup: the board is closed, not empty.
+  const needed = COMMAND_FEATURE[name];
+  if (needed && features) {
+    const flag = await features.off(needed);
+    if (flag) return featureOffReply(needed, flag, { ephemeral: !PUBLIC_COMMANDS.has(name) });
+  }
 
   if (name === 'ideas') {
     const sort = options.sort === 'new' ? 'new' : 'top';
@@ -609,6 +724,11 @@ function gameMatch(game, typed) {
  * an unrecognised command or option yields none. An empty value offers the
  * catalog itself, so the option doubles as a browsable picker.
  *
+ * The picker is the advertised game library, so it respects the switches too:
+ * when the board itself is closed, or the owner has hidden the library from
+ * players, no choices are offered - a typed id or name still reaches the board,
+ * exactly like a deep link on the site still reaches a hidden page.
+ *
  * Discord allows autocomplete 3 seconds and rejects a malformed callback, so
  * the caller must answer with [] rather than nothing when this throws (see
  * bot/index.js); the catalog read here is bounded to leave room for that reply.
@@ -617,6 +737,10 @@ function gameMatch(game, typed) {
 export async function autocomplete(name, rawOptions, ctx) {
   const focused = (rawOptions || []).find((o) => o.focused);
   if (name !== 'leaderboard' || focused?.name !== 'game') return [];
+  if (ctx.features) {
+    if (await ctx.features.off('leaderboard')) return [];
+    if (await ctx.features.hiddenOrOff('catalog')) return [];
+  }
   const typed = String(focused.value ?? '').trim().toLowerCase();
   const catalog = await ctx.arcade.catalog({ timeoutMs: 1500 }).catch(() => null);
   return (catalog?.games || [])

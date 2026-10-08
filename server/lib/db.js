@@ -40,6 +40,13 @@ export function defaultData() {
       announcement: '',
       maxRooms: 200,
       maxPartySize: 16,
+      // Admin-controlled visibility, edited in the console's Features tab.
+      // feature id -> { on, hidden, minRole, schedule? }; empty means
+      // "everything on, shown and kept for staff", which shared/features.js
+      // fills in (and prunes unknown ids from).
+      features: {},
+      // game id -> { on, hidden, minRole }, same meaning for one catalog entry.
+      games: {},
     },
   };
 }

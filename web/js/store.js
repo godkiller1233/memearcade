@@ -65,6 +65,11 @@ export const state = {
   chatTarget: null,
   connection: 'offline',
   view: 'home',
+  // The server's public config (motd, announcement, and the per-feature switch
+  // map an owner edits in the admin console), already resolved for this
+  // account's role.  See featureOn/featureHidden.
+  serverConfig: null,
+  features: {},
   settings: {
     theme: 'arcade-dark',
     accent: '#ff2fb0',
@@ -257,6 +262,45 @@ export function isStaff() {
 
 export function isAdmin() {
   return !!state.me?.permissions?.admin;
+}
+
+/* ------------------------------------------------------------------ *
+ * feature switches
+ * ------------------------------------------------------------------ */
+
+/**
+ * Adopt the server's public config - the boot handshake, the realtime welcome
+ * and the live `config` push all arrive in this shape.  The feature switches
+ * ride inside it *already resolved for this account*: the server applies the
+ * keep-floor (staff by default, or whoever an owner keeps a feature for) before
+ * sending, so a role that keeps a feature simply receives `on: true` and this
+ * side needs no role logic of its own.
+ */
+export function setServerConfig(config) {
+  if (!config || typeof config !== 'object') return state.serverConfig;
+  state.serverConfig = { ...(state.serverConfig || {}), ...config };
+  if (config.features) state.features = config.features;
+  return state.serverConfig;
+}
+
+/** The raw switch map for one feature, defaults filled in. */
+export function featureRaw(id) {
+  return state.features?.[id] || { on: true, hidden: false };
+}
+
+/**
+ * May this account use the feature?  The server already answered for our role
+ * (staff keep everything by default, and a higher keep-floor is applied the
+ * same way), so the flags are the truth here - no local role check.
+ */
+export function featureOn(id) {
+  return featureRaw(id).on !== false;
+}
+
+/** Should the UI stop advertising this feature to this account? */
+export function featureHidden(id) {
+  const flags = featureRaw(id);
+  return flags.hidden === true || flags.on === false;
 }
 
 export function resetClientState() {

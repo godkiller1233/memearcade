@@ -70,6 +70,12 @@ export const config = {
   partyGraceMs: num(env.MEMES_PARTY_GRACE_MS, 20000),
   /** How long a disconnected room seat (or viewer) is kept before cleanup. */
   roomGraceMs: num(env.MEMES_ROOM_GRACE_MS, 20000),
+  /**
+   * How often the server checks whether a scheduled feature window opened or
+   * closed and pushes the change to everybody online.  The floor keeps a bad
+   * value from turning into a busy loop.
+   */
+  scheduleTickMs: Math.max(250, num(env.MEMES_SCHEDULE_TICK_MS, 20000)),
   logLevel: env.MEMES_LOG || 'info',
   /** Optional shared secret so a public server can keep /api/admin private. */
   adminToken: env.MEMES_ADMIN_TOKEN || '',

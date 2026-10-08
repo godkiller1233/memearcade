@@ -125,6 +125,35 @@ function watchNotifies(tok) {
   });
 }
 
+/**
+ * One socket, one message: opens an identified socket, sends the frame and
+ * resolves with the first error frame it hears - or null when the server stayed
+ * quiet, which is how an accepted op looks.  The role checks use it to watch
+ * the same op be refused for one role and accepted for another.
+ */
+function socketReply(tok, msg, timeoutMs = 2500) {
+  return new Promise((resolve) => {
+    const ws = new WebSocket(`${base.replace(/^http/, 'ws')}/ws?token=${encodeURIComponent(tok)}`);
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try { ws.close(); } catch {}
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    ws.onopen = () => { try { ws.send(JSON.stringify(msg)); } catch {} };
+    ws.onmessage = (ev) => {
+      try {
+        const frame = JSON.parse(ev.data);
+        if (frame.t === 'error') finish(frame);
+      } catch {}
+    };
+    ws.onerror = () => finish({ t: 'error', code: 'socket', message: 'the socket failed' });
+  });
+}
+
 /* ------------------------------------------------------------------ *
  * optional local server
  * ------------------------------------------------------------------ */
@@ -179,7 +208,9 @@ async function startLocal() {
   console.log(`\nBooting a local server on port ${PORT}…`);
   child = spawn(process.execPath, [path.join(ROOT, 'server', 'index.js')], {
     cwd: ROOT,
-    env: { ...process.env, MEMES_PORT: String(PORT), MEMES_HOST: '127.0.0.1', MEMES_DATA: DATA, MEMES_PLATFORM: 'smoke', MEMES_ADMIN_PASS: process.env.MEMES_ADMIN_PASS || SMOKE_ADMIN_PASS },
+    // A fast schedule tick: the scheduled-switch checks cross a window boundary
+    // in seconds and cannot wait for the production 20s sweep.
+    env: { ...process.env, MEMES_PORT: String(PORT), MEMES_HOST: '127.0.0.1', MEMES_DATA: DATA, MEMES_PLATFORM: 'smoke', MEMES_ADMIN_PASS: process.env.MEMES_ADMIN_PASS || SMOKE_ADMIN_PASS, MEMES_SCHEDULE_TICK_MS: '500' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stderr.on('data', (b) => process.stderr.write(`[server] ${b}`));
@@ -510,11 +541,206 @@ async function run() {
     check(buf.length === entry.size, `${label} size matches the manifest`);
   }
 
+  /* 7b. feature switches: an owner turns one off, players are refused, staff
+        keep access, a hidden feature still answers, and a switched-off game
+        leaves the player catalog. Every switch touched here is restored, so
+        the rest of the run (and a target) sees a normal arcade again. */
+  if (!adminPass) {
+    console.log('⤼ feature-switch checks skipped: set MEMES_ADMIN_PASS to use the owner on a target');
+  } else {
+    const ownerLogin = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { ...clientHeaders, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: ADMIN_USER, password: adminPass }),
+    });
+    const owner = await ownerLogin.json().catch(() => null);
+    const ownerToken = owner?.token || '';
+    check(!!ownerToken, 'the owner signs in for the feature-switch checks', owner?.message);
+
+    if (ownerToken) {
+      const off = await api('POST', '/api/admin/features', { id: 'suggestions', on: false }, ownerToken);
+      check(off.ok && off.payload?.on === false, 'the owner switches the idea board off', off.payload?.message);
+
+      const refused = await api('GET', '/api/suggestions');
+      check(refused.status === 403, 'a player is refused the switched-off idea board', `status ${refused.status}`);
+      const guestMeta = await api('GET', '/api/meta');
+      check(guestMeta.payload?.config?.features?.suggestions?.on === false,
+        'the handshake tells players the idea board is off', JSON.stringify(guestMeta.payload?.config?.features?.suggestions));
+      const asStaff = await api('GET', '/api/suggestions', undefined, ownerToken);
+      check(asStaff.ok, 'staff keep access to a switched-off feature', `status ${asStaff.status}`);
+
+      /* 7b-ii. role keep-floors: the same switch resolved per role.  A VIP
+            keeps a feature a plain player loses - over REST and over the
+            socket - and each role's own handshake says so. */
+      const playerReg = await api('POST', '/api/auth/register', { name: `role-${Date.now().toString(36)}`, password: 'smoke-pass-2026' });
+      const playerToken = playerReg.payload?.token || '';
+      check(!!playerToken, 'a plain player registers for the role checks', playerReg.payload?.message);
+      const vipReg = await api('POST', '/api/auth/register', { name: `vip-${Date.now().toString(36)}`, password: 'smoke-pass-2026' });
+      const vipToken = vipReg.payload?.token || '';
+      const vipId = vipReg.payload?.user?.id || '';
+      check(!!vipToken && !!vipId, 'a second player registers to become the VIP', vipReg.payload?.message);
+
+      if (playerToken && vipToken) {
+        const promoted = await api('POST', `/api/admin/users/${vipId}`, { op: 'role', role: 'vip' }, ownerToken);
+        check(promoted.ok && promoted.payload?.role === 'vip', 'the owner promotes the second player to VIP', promoted.payload?.message);
+
+        const roleOff = await api('POST', '/api/admin/features', { id: 'suggestions', on: false, minRole: 'vip' }, ownerToken);
+        check(roleOff.ok && roleOff.payload?.on === false && roleOff.payload?.minRole === 'vip',
+          'the owner switches the idea board off, kept for VIPs', JSON.stringify(roleOff.payload?.minRole));
+
+        const playerRead = await api('GET', '/api/suggestions', undefined, playerToken);
+        check(playerRead.status === 403 && /kept for VIPs/.test(playerRead.payload?.message || ''),
+          'a plain player is refused and told who keeps it', `${playerRead.status} ${playerRead.payload?.message || ''}`);
+        const vipRead = await api('GET', '/api/suggestions', undefined, vipToken);
+        check(vipRead.ok, 'a VIP keeps the switched-off feature', `status ${vipRead.status}`);
+        check((await api('GET', '/api/suggestions', undefined, ownerToken)).ok, 'the owner keeps it too');
+
+        const playerFlags = (await api('GET', '/api/meta', undefined, playerToken)).payload?.config?.features?.suggestions;
+        check(playerFlags?.on === false, 'the player handshake says the idea board is off', JSON.stringify(playerFlags));
+        const vipFlags = (await api('GET', '/api/meta', undefined, vipToken)).payload?.config?.features?.suggestions;
+        check(vipFlags?.on === true && vipFlags?.minRole === 'vip', 'the VIP handshake says it is on, kept for VIPs', JSON.stringify(vipFlags));
+
+        // The realtime hub resolves the same floor: one chat send bounces for
+        // the player and goes through for the VIP.
+        const chatOff = await api('POST', '/api/admin/features', { id: 'chat', on: false, minRole: 'vip' }, ownerToken);
+        check(chatOff.ok && chatOff.payload?.minRole === 'vip', 'chat is switched off, kept for VIPs', chatOff.payload?.message);
+        const refusedChat = await socketReply(playerToken, { t: 'chat', scope: 'global', text: 'kept for VIPs, from a player' });
+        check(refusedChat?.code === 'feature-off' && /kept for VIPs/.test(refusedChat?.message || ''),
+          'the player socket is refused, with the keep-floor named', JSON.stringify(refusedChat));
+        const keptChat = await socketReply(vipToken, { t: 'chat', scope: 'global', text: 'kept for VIPs, from a VIP' });
+        check(keptChat?.code !== 'feature-off', 'the VIP socket keeps chat', JSON.stringify(keptChat));
+
+        // Hand chat back to the arcade-wide default before the schedule checks,
+        // which speak for every viewer (the loop at the end restores the rest).
+        await api('POST', '/api/admin/features', { id: 'chat', on: true, hidden: false, minRole: 'mod' }, ownerToken);
+      }
+
+      const hidden = await api('POST', '/api/admin/features', { id: 'changelog', hidden: true }, ownerToken);
+      check(hidden.ok && hidden.payload?.hidden === true, 'the owner hides the changelog');
+      const hiddenRead = await api('GET', '/api/changelog');
+      check(hiddenRead.ok && Array.isArray(hiddenRead.payload?.entries),
+        'a hidden feature still answers - only the navigation drops it', `status ${hiddenRead.status}`);
+
+      const gameId = playable[0]?.engine || playable[0]?.id || '';
+      const gameOff = await api('POST', `/api/admin/games/${gameId}`, { on: false }, ownerToken);
+      check(gameOff.ok && gameOff.payload?.on === false, `the owner switches ${gameId} off`, gameOff.payload?.message);
+      const playerGames = await api('GET', '/api/games');
+      check(!(playerGames.payload?.games || []).some((g) => g.id === gameId),
+        'the switched-off game leaves the player catalog');
+      const staffGames = await api('GET', '/api/games', undefined, ownerToken);
+      const staffEntry = (staffGames.payload?.games || []).find((g) => g.id === gameId);
+      check(staffEntry?.hiddenFor === 'off', 'staff still see the game, badged as off', String(staffEntry?.hiddenFor));
+      const guestCreate = await api('POST', '/api/rooms', { gameId }, guestToken);
+      check(guestCreate.status === 403, 'a player cannot host a switched-off game', `status ${guestCreate.status}`);
+
+      /* 7c. scheduled switches: a window closes a feature by itself and
+            reopens it when it ends.  The first window is 00:00-00:00, which
+            the resolver reads as the whole day - timezone-proof, so it closes
+            chat on a deployed target too, with no clock to wait for. */
+      const socket = new WebSocket(`${base.replace(/^http/, 'ws')}/ws?token=${encodeURIComponent(token)}`);
+      const frames = [];
+      let answerFeatureOff = null;
+      socket.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.t === 'config') frames.push(msg.config?.features?.chat || null);
+          if (msg.t === 'error' && msg.code === 'feature-off' && answerFeatureOff) {
+            const resolve = answerFeatureOff;
+            answerFeatureOff = null;
+            resolve(msg);
+          }
+        } catch {}
+      };
+      const socketReady = new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('the schedule socket never opened')), 5000);
+        socket.onopen = () => { clearTimeout(timer); resolve(); };
+        socket.onerror = () => { clearTimeout(timer); reject(new Error('the schedule socket failed to connect')); };
+      });
+
+      try {
+        await socketReady;
+        const allDay = await api('POST', '/api/admin/features', {
+          id: 'chat',
+          schedule: { enabled: true, days: [0, 1, 2, 3, 4, 5, 6], from: '00:00', to: '00:00' },
+        }, ownerToken);
+        check(allDay.ok && allDay.payload?.closed === true,
+          'a whole-day window closes chat right away', JSON.stringify(allDay.payload?.schedule));
+        check(allDay.payload?.hasSchedule === true && allDay.payload?.schedule?.enabled === true,
+          'the panel can see the stored schedule');
+        check(typeof allDay.payload?.nextChange === 'string' && new Date(allDay.payload.nextChange) > new Date(),
+          'the panel is told when the feature reopens', String(allDay.payload?.nextChange));
+
+        const scheduledMeta = await api('GET', '/api/meta');
+        const scheduledFlags = scheduledMeta.payload?.config?.features?.chat;
+        check(scheduledFlags?.on === false && scheduledFlags?.scheduled === true && typeof scheduledFlags?.until === 'string',
+          'players see the scheduled close, with the reopen time', JSON.stringify(scheduledFlags));
+
+        const refusal = await new Promise((resolve) => {
+          answerFeatureOff = resolve;
+          setTimeout(() => resolve(null), 4000);
+          socket.send(JSON.stringify({ t: 'chat', scope: 'global', text: 'inside a scheduled window' }));
+        });
+        check(!!refusal, 'chat is refused over the socket inside the window', refusal?.message || 'no feature-off error arrived');
+        check(frames.some((f) => f?.on === false && f?.scheduled === true),
+          'the close is pushed to an open client', JSON.stringify(frames.slice(-2)));
+
+        /* A window a few seconds ahead: the sweeper must push the close when it
+           opens and the reopen when it ends, with no request in between. */
+        if (target) {
+          console.log('  note  the close/reopen sweep is checked on the scratch server only (a target clock is its own timezone)');
+        } else {
+          const clockOf = (t) => new Date(t).toTimeString().slice(0, 8);
+          const soon = await api('POST', '/api/admin/features', {
+            id: 'chat',
+            schedule: { enabled: true, days: [0, 1, 2, 3, 4, 5, 6], from: clockOf(Date.now() + 3000), to: clockOf(Date.now() + 12000) },
+          }, ownerToken);
+          check(soon.ok && soon.payload?.closed === false, 'a window in the future leaves chat open for now');
+          const timeline = [];
+          const deadline = Date.now() + 30000;
+          while (Date.now() < deadline) {
+            const meta = await api('GET', '/api/meta');
+            timeline.push(meta.payload?.config?.features?.chat?.on === false ? 'closed' : 'open');
+            if (timeline.includes('closed') && timeline.lastIndexOf('open') > timeline.indexOf('closed')) break;
+            await new Promise((r) => setTimeout(r, 300));
+          }
+          check(timeline.includes('closed') && timeline.lastIndexOf('open') > timeline.indexOf('closed'),
+            'the arcade closes chat at the scheduled minute and reopens when the window ends', timeline.join(' → '));
+          // The reopen frame travels on the socket at the same moment the REST
+          // poll sees it, so give the last push a moment to land before judging.
+          const reopened = Date.now() + 3000;
+          while (Date.now() < reopened && frames.at(-1)?.on === false) await new Promise((r) => setTimeout(r, 150));
+          check(frames.at(-1)?.on !== false && frames.some((f) => f?.on === false),
+            'the open client is pushed both the close and the reopen', JSON.stringify(frames.slice(-3)));
+        }
+      } finally {
+        try { socket.close(); } catch {}
+      }
+
+      for (const [route, body] of [
+        ['/api/admin/features', { id: 'suggestions', on: true, hidden: false, minRole: 'mod' }],
+        ['/api/admin/features', { id: 'changelog', on: true, hidden: false, minRole: 'mod' }],
+        ['/api/admin/features', { id: 'chat', on: true, hidden: false, schedule: null, minRole: 'mod' }],
+        [`/api/admin/games/${gameId}`, { on: true, hidden: false, minRole: 'mod' }],
+      ]) await api('POST', route, body, ownerToken);
+      const restored = await api('GET', '/api/meta');
+      check(restored.payload?.config?.features?.suggestions?.on !== false
+        && restored.payload?.config?.features?.changelog?.hidden !== true
+        && restored.payload?.config?.features?.chat?.on !== false
+        && !restored.payload?.config?.features?.chat?.scheduled
+        && restored.payload?.config?.features?.suggestions?.minRole === 'mod'
+        && restored.payload?.config?.features?.chat?.minRole === 'mod',
+        'every switch the check flipped is back where it started');
+      const afterCreate = await api('POST', '/api/rooms', { gameId, bots: 1 }, guestToken);
+      check(afterCreate.ok, 'the restored game can be hosted again', afterCreate.payload?.message);
+    }
+  }
+
   /* 8. the website itself */
   const page = await fetch(`${base}/`);
   const html = await page.text();
   check(page.ok && /MEMES/.test(html), 'the website index loads', `status ${page.status}`);
   check(/data-view="download"/.test(html), 'the Download tab is in the page');
+  check(/data-view="download" data-feature="downloads"/.test(html), 'the client marks which switch owns each tab');
   const css = await fetch(`${base}/css/app.css`);
   check(css.ok, 'the stylesheet loads', `status ${css.status}`);
   const mainJs = await fetch(`${base}/js/main.js`);

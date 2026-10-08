@@ -9,6 +9,8 @@ import { db } from './lib/db.js';
 import { sessionUser } from './lib/auth.js';
 import { getEngine, engineCatalog } from './games.js';
 import { catalogWithEngines } from '../web/games/registry.js';
+import { featureAllowed, featureRefusal, gameAllowed, gameRefusal } from '../shared/features.js';
+import { publicConfig, catalogFor } from './lib/public-config.js';
 import {
   acceptFriend,
   appendMessage,
@@ -260,14 +262,8 @@ export class RealtimeHub {
         degraded: negotiated.degraded,
         online: onlineCount(),
         features: { discordBot: config.discord.enabled, desktop: true },
-        catalog: catalogWithEngines(engineCatalog()),
-        config: {
-          registrationsOpen: db.data.config.registrationsOpen,
-          motd: db.data.config.motd,
-          announcement: db.data.config.announcement,
-          featured: db.data.config.featured,
-          maxPartySize: db.data.config.maxPartySize,
-        },
+        catalog: catalogFor(session.user),
+        config: publicConfig(session.user),
       }),
     });
     return negotiated;
@@ -382,6 +378,25 @@ export class RealtimeHub {
     }
   }
 
+  /**
+   * Push the site config to everyone connected - an admin just changed the
+   * announcement, a feature switch or a game's visibility, and every player
+   * should see it without reloading.  Each session gets the catalog it is
+   * allowed to see, so a hidden game disappears from open tabs too.
+   */
+  broadcastConfig() {
+    for (const session of this.clients.values()) {
+      // Both halves are per-viewer: a session that has not identified yet gets
+      // the strict guest view (and the guest catalog), and a staff or VIP
+      // session gets its own the moment it signs in.
+      session.conn.send({
+        t: 'config',
+        config: publicConfig(session.user),
+        catalog: catalogFor(session.user),
+      });
+    }
+  }
+
   lobbyStats() {
     return {
       online: onlineCount(),
@@ -445,7 +460,7 @@ export class RealtimeHub {
     try {
       this.route(session, msg);
     } catch (err) {
-      session.conn.send({ t: 'error', code: 'handler', message: err?.message || 'Something went wrong.' });
+      session.conn.send({ t: 'error', code: err?.code || 'handler', message: err?.message || 'Something went wrong.' });
       if (!err.expected) log(`realtime: handler error (${msg.t}):`, err?.stack || err);
     }
   }
@@ -488,8 +503,12 @@ export class RealtimeHub {
       case 'settings':
         return this.handleSettings(session, msg);
       case 'friend':
+        this.requireFeature(session, 'friends');
         return this.handleFriend(session, msg);
       case 'party':
+        // Leaving a party always works: a switch flipped mid-party must not
+        // strand its members in something they can no longer exit.
+        if (msg.op !== 'leave') this.requireFeature(session, 'parties');
         return this.handleParty(session, msg);
       case 'room':
         return this.handleRoom(session, msg);
@@ -498,10 +517,13 @@ export class RealtimeHub {
       case 'tick':
         return this.handleTick(session, msg);
       case 'chat':
+        this.requireFeature(session, 'chat');
         return this.handleChat(session, msg);
       case 'typing':
+        this.requireFeature(session, 'chat');
         return this.handleTyping(session, msg);
       case 'lobby':
+        this.requireFeature(session, 'lobby');
         session.scope = 'lobby';
         return session.conn.send({ t: 'lobby', rooms: this.rooms.lobbyList(), stats: this.rooms.stats(), statsGlobal: this.lobbyStats() });
       case 'leave-lobby':
@@ -510,12 +532,28 @@ export class RealtimeHub {
       case 'suggestions':
         // Just marks the interest (kept separate from the lobby scope): clients
         // read the board over REST and only need the pings below to know when
-        // someone else changed it.
+        // someone else changed it. Un-watching is always allowed.
+        if (msg.watching !== false) this.requireFeature(session, 'suggestions');
         session.watchingSuggestions = msg.watching !== false;
         return session.conn.send({ t: 'suggestions', watching: session.watchingSuggestions });
       default:
         return; // unknown message types are ignored (forward compatibility)
     }
+  }
+
+  /**
+   * Refuse a feature an owner switched off or hid from this socket.  A caller
+   * at or above the keep-floor keeps access (staff by default, so the person who
+   * turned it off can turn it back on), and a socket that has not identified yet
+   * passes through so it still hears the usual "sign in first" from the handler
+   * rather than a feature notice.
+   */
+  requireFeature(session, id) {
+    if (!session.user || featureAllowed(db.data.config, id, { role: session.user.role })) return true;
+    const err = new Error(featureRefusal(db.data.config, id));
+    err.code = 'feature-off';
+    err.expected = true;
+    throw err;
   }
 
   requireAuth(session) {
@@ -688,6 +726,7 @@ export class RealtimeHub {
           break;
         }
         case 'chat': {
+          this.requireFeature(session, 'chat');
           this.rateCheck(session, 'party', CHAT_LIMIT.party);
           const message = {
             id: `p${now()}`,
@@ -812,10 +851,22 @@ export class RealtimeHub {
     const op = String(msg.op || 'create');
     const current = session.roomId ? this.rooms.getRoom(session.roomId) : null;
 
+    // Turning rooms off stops *entering* a room; leaving, playing on and
+    // rematches keep working so a live match is never cut in half.
+    if (op === 'create' || op === 'join') this.requireFeature(session, 'rooms');
+    if (op === 'spectate') this.requireFeature(session, 'spectate');
+    if (op === 'addBot') this.requireFeature(session, 'bots');
+
     switch (op) {
       case 'create': {
         const engine = getEngine(msg.gameId);
         if (!engine) throw new Error(`"${msg.gameId}" is not playable yet - check the catalog for status.`);
+        if (!gameAllowed(db.data.config, engine.meta.id, { role: me.role })) {
+          const err = new Error(gameRefusal(db.data.config, engine.meta.id, engine.meta.name));
+          err.code = 'feature-off';
+          err.expected = true;
+          throw err;
+        }
         if (current) this.leaveRoom(session, current);
         const room = this.rooms.createRoom({
           gameId: msg.gameId,
@@ -824,7 +875,7 @@ export class RealtimeHub {
           options: msg.options || {},
         });
         session.roomId = room.id;
-        if (msg.fillBots) {
+        if (msg.fillBots && featureAllowed(db.data.config, 'bots', { role: me.role })) {
           const want = Math.max(0, (msg.botCount ?? engine.meta.players.min - 1));
           for (let i = 0; i < want; i++) {
             try {
@@ -962,6 +1013,7 @@ export class RealtimeHub {
     const scope = String(msg.scope || 'global');
 
     if (scope === 'dm') {
+      this.requireFeature(session, 'dm');
       this.rateCheck(session, 'dm', CHAT_LIMIT.dm);
       const target = msg.to ? getUser(msg.to) : getUserByName(msg.name);
       if (!target) throw new Error('User not found.');
@@ -1003,6 +1055,7 @@ export class RealtimeHub {
 
   handleTyping(session, msg) {
     if (!session.user) return;
+    if (msg.scope === 'dm') this.requireFeature(session, 'dm');
     const payload = { t: 'typing', scope: msg.scope, userId: session.user.id, name: session.user.name, to: msg.to };
     if (msg.scope === 'dm') this.sendToUser(String(msg.to), payload);
     else if (msg.scope === 'party' && session.partyId) {

@@ -15,7 +15,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Arcade } from './arcade.js';
 import { DiscordRest, DiscordGateway } from './discord.js';
-import { COMMAND_DEFINITIONS, LinkStore, autocomplete, runCommand } from './commands.js';
+import { COMMAND_DEFINITIONS, FeatureGate, LinkStore, PUBLIC_COMMANDS, autocomplete, describeSwitches, runCommand } from './commands.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -39,6 +39,15 @@ const config = {
   guildId: process.env.DISCORD_GUILD_ID || '',
   apiBase: process.env.DISCORD_API_BASE || 'https://discord.com/api/v10',
   gatewayUrl: process.env.DISCORD_GATEWAY_URL || '',
+  /**
+   * How long the bot may trust the switch map it read.  Commands ask on every
+   * invocation, so a short cache keeps that to one call; 0 reads the switches
+   * afresh for every command (what the checks use).
+   */
+  featureTtlMs: (() => {
+    const n = Number(process.env.BOT_FEATURE_TTL_MS);
+    return Number.isFinite(n) && n >= 0 ? n : 10000;
+  })(),
 };
 
 const log = (msg) => console.log(`[bot] ${msg}`);
@@ -66,6 +75,12 @@ async function main() {
   } catch (err) {
     log(`warning: ${err.message} - commands will reply with an error until it is up`);
   }
+
+  // The owner's feature switches, read once at boot: an owner who scheduled the
+  // idea board off for the night should hear it from the bot log rather than
+  // from a player.  Every command re-reads through the same gate.
+  const features = new FeatureGate(arcade, { ttlMs: config.featureTtlMs });
+  log(describeSwitches(await features.flags()));
 
   const rest = new DiscordRest({ token: config.discordToken, base: config.apiBase });
   let me;
@@ -97,7 +112,7 @@ async function main() {
     const name = interaction.data?.name || 'unknown';
     let choices = [];
     try {
-      choices = await autocomplete(name, interaction.data?.options || [], { arcade });
+      choices = await autocomplete(name, interaction.data?.options || [], { arcade, features });
     } catch (err) {
       log(`/${name} autocomplete failed: ${err.message}`);
     }
@@ -112,14 +127,14 @@ async function main() {
     const name = interaction.data?.name || 'unknown';
     const user = interaction.member?.user || interaction.user || {};
     // /ideas, /changelog and /leaderboard are public; the rest reply privately.
-    const ephemeral = !['ideas', 'changelog', 'leaderboard'].includes(name);
+    const ephemeral = !PUBLIC_COMMANDS.has(name);
     try {
       // Defer first: the arcade round-trip may take longer than Discord's 3s window.
       await rest.interactionCallback(interaction.id, interaction.token, {
         type: 5,
         data: ephemeral ? { flags: 64 } : undefined,
       });
-      const reply = await runCommand(name, interaction.data?.options || [], { arcade, links, user, log });
+      const reply = await runCommand(name, interaction.data?.options || [], { arcade, links, user, features, log });
       const payload = {
         content: String(reply.content || '').slice(0, 1990),
         allowed_mentions: { parse: [] },
