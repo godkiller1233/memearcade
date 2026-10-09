@@ -68,7 +68,7 @@
  */
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -79,6 +79,11 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT_RANGE = { start: 8871, span: 40 };
 let PORT = null; // a scratch port, chosen in startServer from the ones actually free
 const DATA = path.join(ROOT, 'data', 'browser-reload');
+// The tree the scratch server fingerprints as "the build it is serving".  It
+// lives outside the repo on purpose: the update check has to move it under a
+// running server, and nothing on disk here should be touched by a test.
+const ASSETS = mkdtempSync(path.join(os.tmpdir(), 'memes-assets-'));
+const ASSET_FILE = path.join(ASSETS, 'app.js');
 
 const args = process.argv.slice(2);
 const argOf = (name, fallback) => {
@@ -170,6 +175,7 @@ let server = null;
 
 async function startServer() {
   rmSync(DATA, { recursive: true, force: true });
+  writeFileSync(ASSET_FILE, '/* build one */\n');
   // Bind-probe the suite's range first: a port a leftover server still holds is
   // skipped rather than booted onto, so the run never deliberately boots onto
   // another process's leftovers.
@@ -184,6 +190,9 @@ async function startServer() {
       MEMES_PORT: String(PORT),
       MEMES_HOST: '127.0.0.1',
       MEMES_DATA: DATA,
+      // Make the served build a tree this run can move: the live-build check
+      // rewrites it to prove an open tab notices a deploy.
+      MEMES_ASSET_DIR: ASSETS,
       MEMES_PLATFORM: 'browser-reload',
       MEMES_ADMIN_PASS: process.env.MEMES_ADMIN_PASS || SCRATCH_ADMIN_PASS,
       // Party seats expire quickly here: the party-chat departure check must
@@ -1537,6 +1546,136 @@ async function main() {
   await until(`!document.querySelector('#app').classList.contains('hidden')`, 'the play-testing app shell', 25000);
   check(true, 'the play-testing session is restored');
 
+  /* Every catalog game must draw for every seat it can seat.
+   *
+   * The headless engine harness plays each game bot-vs-bot but never calls
+   * render(), so a field a game's render() reads while its view() never sets it
+   * stayed invisible until a real player hit that seat - Codenames threw
+   * "Cannot read properties of undefined (reading 'a')" for its spymaster and
+   * showed "This game failed to draw" instead of the board.  This drives the
+   * engines' own views directly (off-screen, so nothing is mounted over the
+   * page) across the seats and a few bot moves, which is the cheapest way to
+   * catch that whole class of bug for every game at once.  Two halves keep each
+   * evaluate inside its time budget. */
+  console.log('\nEvery game drawing every seat…');
+  await evaluate(`window.__drawSweep = async (from, to) => {
+    const mod = await import('/games/engines/registry-loader.js');
+    const ui = await import('/games/engines/ui.js');
+    const list = (await (await fetch('/api/games')).json()).games.filter((g) => g.playable);
+    const failures = [];
+    const quiet = [];
+    let renders = 0;
+    // Count live timers across the sweep: a render whose loop outlives its own
+    // cleanup would keep burning the main thread for the rest of the suite, so
+    // this asserts the engines hand their timers back the way the app expects.
+    const live = new Set();
+    const realSet = window.setInterval, realClear = window.clearInterval;
+    window.setInterval = (...a) => { const id = realSet(...a); live.add(id); return id; };
+    window.clearInterval = (id) => { live.delete(id); return realClear(id); };
+    try {
+    for (const game of list.slice(from, to)) {
+      let engine = null;
+      try { engine = await mod.loadEngine(game.engine || game.id); } catch (e) { failures.push(game.id + ' load: ' + e.message); continue; }
+      if (!engine) { failures.push(game.id + ': no engine module'); continue; }
+      const min = engine.meta?.players?.min || 2;
+      const count = Math.min(10, Math.max(3, min + 1));
+      const players = Array.from({ length: count }, (_, i) => ({ id: 'p' + i, name: 'P' + i, kind: i === 0 ? 'human' : 'bot', level: 3, avatar: '\u{1F916}' }));
+      let state = null;
+      try { state = engine.create({ players, seed: 700 + count, rng: Math.random }); } catch (e) { failures.push(game.id + ' create: ' + e.message); continue; }
+      let drew = false;
+      for (let step = 0; step < 5; step++) {
+        for (const p of players) {
+          let view = null;
+          try { view = engine.view(state, p.id); } catch (e) { failures.push(game.id + ' view seat ' + p.id + ': ' + e.message); continue; }
+          const el = document.createElement('div');
+          try {
+            const cleanup = engine.render({ el, view, state, playerId: p.id, players, send: () => {}, host: { uiState: {} } });
+            renders++;
+            if (el.textContent.trim() || el.querySelector('canvas')) drew = true;
+            // Unmount exactly the way web/js/host.js does it: park the handback
+            // on the mount's first child, then clear the whole tree.  Calling the
+            // handback alone leaves the stage's own timers behind.
+            if (typeof cleanup === 'function' && el.firstElementChild) el.firstElementChild.__cleanup = cleanup;
+            ui.cleanupTree(el);
+          } catch (e) { failures.push(game.id + ' render ' + count + 'p seat ' + p.id + ': ' + e.message); }
+        }
+        const order = Array.isArray(state.turn) && state.turn.length ? state.turn : players.map((p) => p.id);
+        let moved = false;
+        for (const actor of order) {
+          let action = null;
+          try { action = engine.bot(state, actor); } catch (e) { failures.push(game.id + ' bot: ' + e.message); break; }
+          if (!action) continue;
+          try { if (engine.act(state, actor, action)?.ok !== false) { moved = true; break; } } catch (e) { failures.push(game.id + ' act: ' + e.message); break; }
+        }
+        if (!moved) break;
+      }
+      if (!drew) quiet.push(game.id);
+    }
+    } finally {
+      window.setInterval = realSet;
+      window.clearInterval = realClear;
+    }
+    return { games: list.length, renders, failures, quiet, leaked: live.size };
+  }`);
+  const drawFirst = await evaluate(`window.__drawSweep(0, 21)`);
+  const drawSecond = await evaluate(`window.__drawSweep(21, 999)`);
+  const drawFailures = [...(drawFirst?.failures || []), ...(drawSecond?.failures || [])];
+  const drawQuiet = [...(drawFirst?.quiet || []), ...(drawSecond?.quiet || [])];
+  const drawRenders = (drawFirst?.renders || 0) + (drawSecond?.renders || 0);
+  const drawGames = drawFirst?.games || 0;
+  const drawLeaked = (drawFirst?.leaked || 0) + (drawSecond?.leaked || 0);
+  check(drawFailures.length === 0, `every game draws for every seat (${drawRenders} draws across ${drawGames} games)`, drawFailures.slice(0, 4).join('; '));
+  check(drawQuiet.length === 0, 'every game draws something for its seats', drawQuiet.join(', '));
+  check(drawLeaked === 0, 'every game hands its timers back on unmount', `${drawLeaked} still ticking`);
+
+  /* ------------------------------------------------------------------ *
+   * every spot-the-difference difference is actually visible
+   * ------------------------------------------------------------------ */
+  /* Spot the Difference hides some shapes to make a "gone" difference, and the
+   * flag that hides them was never read by the painter: that spot was identical
+   * in both panels, so the server accepted a click there but no player could
+   * ever find it.  A crash sweep cannot see that, so this paints the two panels
+   * off-screen and compares pixels inside the engine's own click tolerance.
+   * The rng is seeded, so this is a fixed scene, not a lucky draw. */
+  console.log('\nEvery difference is visible…');
+  const diffReport = await evaluate(`(async () => {
+    const mod = await import('/games/engines/registry-loader.js');
+    const engine = await mod.loadEngine('spot-difference');
+    let a = 4242;
+    const rng = () => { a = (a * 1103515245 + 12345) & 0x7fffffff; return a / 0x7fffffff; };
+    const players = [0, 1].map((i) => ({ id: 'p' + i, name: 'P' + i, kind: i ? 'bot' : 'human', level: 3 }));
+    const state = engine.create({ players, seed: 9, rng });
+    const el = document.createElement('div');
+    engine.render({ el, view: engine.view(state, 'p0'), state, playerId: 'p0', players, send: () => {}, host: { uiState: {} } });
+    await new Promise((r) => setTimeout(r, 60));
+    const panels = [...el.querySelectorAll('canvas')];
+    if (panels.length !== 2) return { panels: panels.length };
+    const sample = (canvas, nx, ny, half) => {
+      const ctx = canvas.getContext('2d');
+      const x = Math.max(0, Math.round(nx * canvas.width - half));
+      const y = Math.max(0, Math.round(ny * canvas.height - half));
+      const w = Math.min(canvas.width - x, half * 2);
+      const h = Math.min(canvas.height - y, half * 2);
+      return ctx.getImageData(x, y, w, h).data;
+    };
+    const round = state.rounds[state.round - 1];
+    const differences = round.diffs.length;
+    const invisible = [];
+    for (const diff of round.diffs) {
+      // Half of the engine's own 0.08 hit tolerance, in device pixels.
+      const half = Math.max(2, Math.round(panels[0].width * 0.08));
+      const A = sample(panels[0], diff.x, diff.y, half);
+      const B = sample(panels[1], diff.x, diff.y, half);
+      let same = A.length === B.length;
+      for (let i = 0; same && i < A.length; i++) if (A[i] !== B[i]) same = false;
+      if (same) invisible.push(diff.kind + '@' + diff.x.toFixed(2));
+    }
+    return { panels: panels.length, differences, invisible };
+  })()`);
+  check(diffReport?.panels === 2, 'both difference panels painted', `saw ${diffReport?.panels}`);
+  check(!!diffReport?.differences, `the scene has differences to find (${diffReport?.differences})`);
+  check((diffReport?.invisible || []).length === 0, 'every difference changes the picture', (diffReport?.invisible || []).join(', '));
+
   console.log('\nHosting a realtime room through the UI…');
   await until(`document.querySelector('.game-card')`, 'the catalog to render');
   check(await clickText('Browse all games'), 'opened the games catalog');
@@ -1593,6 +1732,129 @@ async function main() {
     check(!!roomB && roomB.status === 'playing' && roomB.code === firstRoom.code && t2 > t1,
       `reload ${cycle}: the room survives and keeps receiving snapshots`, `+${t2 - t1}ms`);
   }
+
+  /* ------------------------------------------------------------------ *
+   * a shipped build reaches an open tab
+   * ------------------------------------------------------------------ */
+
+  /* The socket pushes owner changes - features, the catalog, an announcement -
+   * but it can never push new engine code or redrawn art, because that was
+   * loaded once and will not run again.  So the page compares the build stamp it
+   * booted with against the one the server is serving, and offers the reload
+   * itself.  Here the scratch server's asset tree is moved underneath a tab that
+   * is already open, exactly as a deploy would.
+   */
+  if (TARGET) {
+    console.log("\nShipping a new build to an open tab… (skipped: a deployed build's assets are not ours to move)");
+  } else {
+    console.log('\nShipping a new build to an open tab…');
+    const stampOf = async () => (await (await fetch(`${BASE}/api/build`)).json().catch(() => null))?.build || '';
+    const booted = await stampOf();
+    check(/^[0-9a-f]{8,}$/.test(booted), 'the server publishes the build it is serving', booted || 'no stamp');
+    const handshake = await (await fetch(`${BASE}/api/meta`)).json().catch(() => null);
+    check(handshake?.config?.build === booted, 'the handshake tells a fresh client which build it booted on', JSON.stringify(handshake?.config?.build));
+    const reloadButton = `[...document.querySelectorAll('.toast-actions button')].some((b) => /reload/i.test(b.textContent))`;
+    const clickReload = `(() => { const b = [...document.querySelectorAll('.toast-actions button')].find((x) => /reload/i.test(x.textContent)); if (!b) return false; b.click(); return true; })()`;
+    // CDP has no way to background a page, and the rule under test is what the
+    // page does about being hidden, so the document answers for itself.
+    const hide = `Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });`;
+    const show = `Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });`;
+    /* A deploy rewrites the assets, so the served build moves.  The stamp is
+     * memoised for a couple of seconds, so the server is polled past that window
+     * rather than immediately.  Nothing tells the tab over the socket: it finds
+     * out by asking, and coming back to the front is what makes it ask. */
+    const ship = async (label) => {
+      writeFileSync(ASSET_FILE, `/* ${label} shipped at ${Date.now()} */\n`);
+      await sleep(2600);
+      return stampOf();
+    };
+
+    const shipped = await ship('build two');
+    check(!!shipped && shipped !== booted, 'shipping an asset moves the stamp the server reports', `${booted} -> ${shipped}`);
+
+    // The tab is hosting a live match here, which is exactly the case a reload
+    // must not walk over.
+    await evaluate(`document.dispatchEvent(new Event('visibilitychange')); true`);
+    const offered = await expectTrue(reloadButton, 'a mid-match tab is offered the reload, not forced into it', 15000);
+
+    if (offered) {
+      // `window.__beforeUpdate` cannot survive a navigation, so it proves the
+      // app really reloaded rather than merely re-rendering under the toast.
+      await evaluate(`window.__beforeUpdate = true; ${clickReload}`);
+      await expectTrue(`window.__beforeUpdate === undefined`, 'the tab takes the update', 20000);
+      await expectTrue(`!document.querySelector('#app').classList.contains('hidden')`, 'the updated tab comes back signed in', 25000);
+      await sleep(1200);
+      const nagging = await evaluate(reloadButton).catch(() => false);
+      check(!nagging, 'the tab does not ask again once it is on the new build');
+
+      /* The same deploy, but arriving while the player is away from a tab that
+       * is still mid-match: it must hold the reload rather than walk over the
+       * room, must not shout into an empty room, and must offer it the moment
+       * they are back.  The room is rejoined by the reload above, so this is the
+       * same live match, moved behind the scenes. */
+      const midMatch = await evaluate(`!!document.querySelector('#game-stage canvas')`).catch(() => false);
+      if (midMatch) {
+        await evaluate(`${hide} true`);
+        const hiddenShip = await ship('build three');
+        check(!!hiddenShip && hiddenShip !== shipped, 'a deploy while the player is away moves the stamp too', `${shipped} -> ${hiddenShip}`);
+        await evaluate(`window.__beforeUpdate = true;
+          document.querySelectorAll('.toast').forEach((t) => t.remove());
+          window.dispatchEvent(new Event('online')); true`);
+        await sleep(600);
+        const held = await evaluate(`window.__beforeUpdate === true`).catch(() => false);
+        check(held, 'a hidden tab with a match on it is not reloaded out from under the room');
+        const quietOffer = await evaluate(reloadButton).catch(() => true);
+        check(!quietOffer, 'and it does not offer the reload where nobody can see it');
+        await evaluate(`${show} document.dispatchEvent(new Event('visibilitychange')); true`);
+        const caughtUp = await expectTrue(reloadButton, 'the held update is offered the moment the player is back', 12000);
+        if (caughtUp) {
+          await evaluate(`window.__beforeUpdate = true; ${clickReload}`);
+          await expectTrue(`window.__beforeUpdate === undefined`, 'the held update lands on the reload', 20000);
+          await expectTrue(`!document.querySelector('#app').classList.contains('hidden')`, 'the tab is back on the newest build', 25000);
+          await sleep(1000);
+        }
+      } else {
+        console.log('  note  the tab was not mid-match, so the held-update branch was not exercised');
+      }
+
+      /* And nobody watching at all: a hidden tab with nothing riding on it takes
+       * the update itself, so there is no prompt to miss.  `__beforeUpdate`
+       * surviving here would mean it had merely offered instead. */
+      await evaluate(`window.__setView('home'); true`);
+      await sleep(400);
+      const thirdShip = await ship('build four');
+      check(!!thirdShip && thirdShip !== shipped, 'the stamp keeps moving as builds ship', `${shipped} -> ${thirdShip}`);
+      await evaluate(`${hide} window.__beforeUpdate = true; window.dispatchEvent(new Event('online')); true`);
+      await expectTrue(`window.__beforeUpdate === undefined`, 'a hidden, idle tab updates itself with no prompt', 20000);
+      await expectTrue(`!document.querySelector('#app').classList.contains('hidden')`, 'the quietly updated tab comes back usable', 25000);
+    }
+
+    // And the watcher itself: one shout per distinct build, never a loop.
+    const watchReport = await evaluate(`(async () => {
+      const mod = await import('/js/build-watch.js');
+      let next = 'stalecafe';
+      const fired = [];
+      const w = mod.watchBuilds({
+        build: 'bootedcafe',
+        intervalMs: 5000,
+        fetchImpl: async () => ({ ok: true, json: async () => ({ build: next }) }),
+        onNew: (info) => fired.push(info.build),
+      });
+      await w.check();
+      const afterFirst = fired.length;
+      await w.check();
+      const afterSame = fired.length;
+      next = 'newerfeed';
+      await w.check();
+      const afterSecond = fired.length;
+      w.stop();
+      return { afterFirst, afterSame, afterSecond, stamp: w.stamp() };
+    })()`);
+    check(watchReport?.afterFirst === 1 && watchReport?.afterSame === 1,
+      'a watcher shouts once for a new build, not once per poll', JSON.stringify(watchReport));
+    check(watchReport?.afterSecond === 2 && watchReport?.stamp === 'newerfeed',
+      'a watcher shouts again for the next build', JSON.stringify(watchReport));
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -1613,6 +1875,7 @@ try {
   // Leave no scratch data behind: the stray-state check fails the build on any
   // suite that does (see tools/leak-check.mjs).
   rmSync(DATA, { recursive: true, force: true });
+  rmSync(ASSETS, { recursive: true, force: true });
 }
 
 const where = TARGET ? BASE : `scratch server on port ${PORT}`;

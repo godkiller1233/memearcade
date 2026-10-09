@@ -84,6 +84,28 @@ instead of the billing page.
 Sign in, then **Admin → Server settings** to set the MOTD and close
 registrations (`MEMES_REGISTRATIONS=closed`) once your friends have joined.
 
+### Deploys reaching the people already there
+
+Nobody has to be told to refresh. The server fingerprints the assets it serves
+(`server/lib/build.js`) and every client keeps the stamp it booted on. When a
+later one differs the tab moves itself: out of sight if nobody is looking and no
+match is running, otherwise with a **Reload** button - never mid-rally.
+
+The socket is the fast path (the stamp rides the welcome and every config push,
+so a reconnecting tab learns immediately) and `GET /api/build` is the backstop
+for a tab that has been sitting on the same page for a while.
+
+The fingerprint is path + size + mtime. A deploy that rewrites a file without
+changing either would be invisible, so set a revision too when you can:
+
+```bash
+MEMES_REVISION=$(git rev-parse --short HEAD)
+```
+
+Any change to that value moves the stamp on its own. `MEMES_ASSET_DIR` points the
+fingerprint at a different tree, for a setup where the server does not serve the
+directory it ships.
+
 ### 6. Running the Discord bot - free, from your own PC
 
 A background worker is the natural home for `npm run bot`, but workers are not

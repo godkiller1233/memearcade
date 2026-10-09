@@ -438,22 +438,37 @@ function smashAi(state, id, dt) {
 }
 
 function drawSmash(ctx, w, h, snapshot, playerId) {
-  const sky = ctx.createLinearGradient(0, 0, 0, h);
-  sky.addColorStop(0, '#1e1b4b');
-  sky.addColorStop(1, '#0f172a');
-  ctx.fillStyle = sky;
-  ctx.fillRect(0, 0, w, h);
+  // The same neon arena language as the other action games, so the brawl has a
+  // lit floor to happen over instead of a bare gradient.
+  UI.arenaBackdrop(ctx, w, h, { palette: 'neon', horizon: 0.72, stars: 34 });
   for (const platform of snapshot.platforms || []) {
-    ctx.fillStyle = '#334155';
-    ctx.fillRect(platform.x1, platform.y1, platform.x2 - platform.x1, 14);
-    ctx.fillStyle = '#64748b';
-    ctx.fillRect(platform.x1, platform.y1, platform.x2 - platform.x1, 4);
+    const pw = platform.x2 - platform.x1;
+    ctx.save();
+    // A drop shadow under the deck sells the height the fighters jump from.
+    ctx.fillStyle = 'rgba(2,6,23,0.5)';
+    UI.roundRect(ctx, platform.x1 + 3, platform.y1 + 6, pw, 14, 6);
+    ctx.fill();
+    const deck = ctx.createLinearGradient(0, platform.y1, 0, platform.y1 + 14);
+    deck.addColorStop(0, '#64748b');
+    deck.addColorStop(1, '#1e293b');
+    UI.withGlow(ctx, '#38bdf8', 10, () => {
+      ctx.fillStyle = deck;
+      UI.roundRect(ctx, platform.x1, platform.y1, pw, 14, 6);
+      ctx.fill();
+    });
+    ctx.fillStyle = 'rgba(186,220,255,0.55)';
+    UI.roundRect(ctx, platform.x1 + 3, platform.y1 + 2, Math.max(0, pw - 6), 3, 2);
+    ctx.fill();
+    ctx.restore();
   }
   for (const shot of snapshot.projectiles || []) {
-    ctx.fillStyle = shot.color || '#facc15';
-    ctx.beginPath();
-    ctx.arc(shot.x, shot.y, 8, 0, Math.PI * 2);
-    ctx.fill();
+    const color = shot.color || '#facc15';
+    UI.withGlow(ctx, color, 14, () => {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(shot.x, shot.y, 8, 0, Math.PI * 2);
+      ctx.fill();
+    });
   }
   ctx.font = 'bold 12px system-ui, sans-serif';
   for (const p of snapshot.players || []) {
@@ -462,10 +477,22 @@ function drawSmash(ctx, w, h, snapshot, playerId) {
     if (fighter.respawn > 0) continue;
     const blink = fighter.invuln > 0 && Math.floor(fighter.invuln * 12) % 2 === 0;
     ctx.globalAlpha = blink ? 0.35 : 1;
-    ctx.fillStyle = fighter.skin?.color || '#38bdf8';
+    const skin = fighter.skin?.color || '#38bdf8';
+    // Lit body with a darker rim: a flat silhouette read as a placeholder.
+    UI.withGlow(ctx, skin, 14, () => {
+      const body = ctx.createRadialGradient(fighter.x - 6, fighter.y - 8, 2, fighter.x, fighter.y, 22);
+      body.addColorStop(0, UI.shadeColor(skin, 0.45));
+      body.addColorStop(1, UI.shadeColor(skin, -0.2));
+      ctx.fillStyle = body;
+      ctx.beginPath();
+      ctx.ellipse(fighter.x, fighter.y, 17, 20, 0, 0, Math.PI * 2);
+      ctx.fill();
+    });
+    ctx.strokeStyle = UI.withAlpha(UI.shadeColor(skin, -0.45), 0.9);
+    ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.ellipse(fighter.x, fighter.y, 17, 20, 0, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.stroke();
     ctx.fillStyle = '#0f172a';
     ctx.beginPath();
     ctx.arc(fighter.x + fighter.facing * 6, fighter.y - 6, 3, 0, Math.PI * 2);

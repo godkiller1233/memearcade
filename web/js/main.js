@@ -16,6 +16,7 @@ import { LocalHost, OnlineHost, seatsFor } from './host.js';
 import { roomAlertText } from './netcode.js';
 import { unlockAudio, toggleMusic, sfx, currentTrack } from './audio.js';
 import { loadEngine } from '../games/engines/registry-loader.js';
+import { watchBuilds } from './build-watch.js';
 
 /* ------------------------------------------------------------------ *
  * boot
@@ -33,6 +34,10 @@ async function boot() {
     state.catalog = meta.catalog || [];
     state.categories = [...new Set(state.catalog.map((g) => g.category))];
     setServerConfig(meta.config);
+    // Remember the build this page booted with and start watching for a newer
+    // one (see the live-builds section below).
+    loadedBuild = String(meta.config?.build || '');
+    startBuildWatch();
     const restoreNote = document.createElement('div');
     restoreNote.className = 'muted small';
     restoreNote.textContent = meta.degraded?.length ? `Compatibility: ${meta.degraded.join(', ')}` : 'Compatibility: full';
@@ -685,7 +690,19 @@ function mountOnlineStage(stage = null) {
 function applyConfigPush(msg) {
   const snapshot = () => JSON.stringify([state.features, (state.catalog || []).map((g) => g.id)]);
   const before = snapshot();
+  const incoming = String(msg.config?.build || '');
   setServerConfig(msg.config);
+  // The build is read before anything else can overwrite the stored config: the
+  // first answer is what this page is running.  Any later answer that differs
+  // is a deploy this tab missed - a reconnect is often the first to notice it.
+  if (incoming) {
+    if (!loadedBuild) {
+      loadedBuild = incoming;
+      startBuildWatch();
+    } else if (incoming !== loadedBuild) {
+      noticeNewBuild(incoming);
+    }
+  }
   if (msg.catalog?.length) {
     state.catalog = msg.catalog;
     state.categories = [...new Set(state.catalog.map((g) => g.category))];
@@ -913,6 +930,72 @@ rt.on('banned', (msg) => {
 rt.on('maintenance', (msg) => toast(msg.message, 'warn', 10000));
 
 rt.on('toast', (msg) => toast(msg.text || '', msg.kind || ''));
+
+/* ------------------------------------------------------------------ *
+ * live builds
+ * ------------------------------------------------------------------ */
+
+/** The build this page booted from - the first stamp the server ever sent us. */
+let loadedBuild = '';
+/** The build we have already offered to move to, so one deploy nags once. */
+let offeredBuild = '';
+/** A deploy that arrived while nobody was watching or a match was on. */
+let pendingBuild = '';
+let buildWatcher = null;
+
+/** Is this tab mid-match?  A reload would drop it, so it is never automatic. */
+function matchInProgress() {
+  return state.view === 'play' && !!activeHost && !activeHost.disposed
+    && (state.room ? true : !!state.localGame);
+}
+
+/** Take the build on the spot, by wandering off the old one. */
+function offerBuild() {
+  pendingBuild = '';
+  toast('A new version of the arcade is ready.', 'good', 20000, [
+    { label: 'Reload', onClick: () => location.reload() },
+  ]);
+}
+
+/**
+ * A newer build is being served than the one running here.
+ *
+ * Nobody is watching and no match depends on this tab, so reload out of sight -
+ * the new build is simply there when the player comes back.  If a match *is*
+ * running the reload waits: taking a rally away from someone is worse than
+ * being a version behind, and only they know if now is a good moment.  A hold
+ * that lands while the tab is hidden is remembered rather than toasted into the
+ * void, so it is offered the moment they are looking again.
+ */
+function noticeNewBuild(next) {
+  if (!next || next === offeredBuild) return;
+  offeredBuild = next;
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+    if (!matchInProgress()) {
+      location.reload();
+      return;
+    }
+    pendingBuild = next;
+    return;
+  }
+  offerBuild();
+}
+
+// Back in front of the screen: anything held while away is offered now.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && pendingBuild) offerBuild();
+});
+
+/**
+ * Start watching once we know which build this page is running.  The stamp
+ * arrives with the config (the boot handshake or the socket's welcome), so a
+ * tab that reconnects after a deploy learns immediately; the poll is the
+ * backstop for a tab whose socket went quiet.
+ */
+function startBuildWatch() {
+  if (buildWatcher || !loadedBuild) return;
+  buildWatcher = watchBuilds({ build: loadedBuild, onNew: ({ build }) => noticeNewBuild(build) });
+}
 
 /* ------------------------------------------------------------------ *
  * global wiring

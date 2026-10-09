@@ -37,11 +37,27 @@ function makeScene(seed, density = 18) {
 
 function paintShapes(ctx, w, h, scene) {
   const colors = scene.colors || paletteColors(scene.key);
-  ctx.fillStyle = colors[0];
+  // A gradient sky and a vignette behind the shapes: two flat panels of colour
+  // read as a swatch, not as a picture you are meant to compare.
+  const sky = ctx.createLinearGradient(0, 0, 0, h);
+  sky.addColorStop(0, UI.shadeColor(colors[0], 0.14));
+  sky.addColorStop(0.6, colors[0]);
+  sky.addColorStop(1, UI.shadeColor(colors[0], -0.26));
+  ctx.fillStyle = sky;
   ctx.fillRect(0, 0, w, h);
   for (const shape of scene.shapes) {
+    // A "gone" difference is stored as a flag on the shape it removed.  Drawing
+    // it anyway left that spot identical in both panels, so the difference was
+    // accepted by the server but impossible to see - the whole round was one
+    // un-findable spot short.
+    if (shape.hidden) continue;
     UI.drawShape(ctx, shape.type, shape.x * w, shape.y * h, shape.size * Math.min(w, h) * 1.6, shape.color, shape.rot, shape.alpha ?? 1);
   }
+  const vig = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.36, w / 2, h / 2, Math.max(w, h) * 0.82);
+  vig.addColorStop(0, 'rgba(0,0,0,0)');
+  vig.addColorStop(1, 'rgba(0,0,0,0.3)');
+  ctx.fillStyle = vig;
+  ctx.fillRect(0, 0, w, h);
 }
 
 /* ========================================================================= *
@@ -235,10 +251,25 @@ export const spotDifference = {
           if (!ids.length) continue;
           const diff = view.diffSpots?.[i];
           if (!diff) continue;
-          ctx.beginPath();
-          ctx.arc(diff.x * w, diff.y * h, 16, 0, Math.PI * 2);
-          ctx.strokeStyle = ids.includes(playerId) ? '#22c55e' : '#facc15';
+          const mine = ids.includes(playerId);
+          const color = mine ? '#22c55e' : '#facc15';
+          const cx = diff.x * w;
+          const cy = diff.y * h;
+          UI.withGlow(ctx, color, 10, () => {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(cx, cy, 17, 0, Math.PI * 2);
+            ctx.stroke();
+          });
+          // A tick inside the ring, so "done" reads without a legend.
+          ctx.strokeStyle = mine ? '#dcfce7' : '#fef9c3';
           ctx.lineWidth = 3;
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(cx - 7, cy + 1);
+          ctx.lineTo(cx - 2, cy + 6);
+          ctx.lineTo(cx + 8, cy - 6);
           ctx.stroke();
         }
       }, { className: 'spot-canvas' });

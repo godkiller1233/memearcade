@@ -717,6 +717,10 @@ export const codenames = {
     v.teams = state.teams;
     v.myTeam = state.teams.a.includes(viewerId) ? 'a' : state.teams.b.includes(viewerId) ? 'b' : null;
     v.iAmSpymaster = state.spymasters.a === viewerId || state.spymasters.b === viewerId;
+    // Who is giving the clue right now - the board names them while everyone
+    // waits, and a spymaster only gets the clue box when this is them.  The
+    // whole spymasters map stays out of the view (see the header).
+    v.spymasterNow = state.spymasters[state.team] || null;
     v.key = v.iAmSpymaster || state.winnerId ? state.grid.map((cell) => cell.color) : null;
     v.grid = state.grid.map((cell) => ({ word: cell.word, revealed: cell.revealed, color: cell.revealed ? cell.color : null }));
     v.clue = state.clue;
@@ -860,17 +864,19 @@ export const codenames = {
         else if (key) cls.push(`keyed ${key}`);
         return UI.gridButton(cell.word, () => send({ type: 'guess', word: cell.word }), {
           className: cls.join(' '),
-          disabled: cell.revealed || view.phase !== 'guess' || team !== view.team || playerId === view.spymasters?.[view.team] || !!view.winnerId,
+          // A spymaster never guesses - they only give clues (the server
+          // refuses them too), so their board stays read-only.
+          disabled: cell.revealed || view.phase !== 'guess' || team !== view.team || view.iAmSpymaster || !!view.winnerId,
         });
       })));
-    if (view.iAmSpymaster && view.phase === 'clue' && playerId === view.spymasters[view.team]) {
+    if (view.iAmSpymaster && view.phase === 'clue' && view.myTeam === view.team) {
       const mine = view.grid.map((c, i) => ({ c, i })).filter(({ c, i }) => view.key[i] === 'a' || view.key[i] === 'b');
       el.appendChild(UI.muted(`You are the spymaster for Team ${view.team.toUpperCase()} (${myTeamColor === 'a' ? 'blue' : 'red'}). Words with a dot are yours.`));
       el.appendChild(UI.inputRow('One-word clue...', (text) => send({ type: 'clue', word: text, count: 2 }), { submitLabel: 'Give clue (×2)' }));
     } else if (view.phase === 'guess' && team === view.team) {
       el.appendChild(UI.row(UI.muted(`Guess the ${view.clue?.word || ''} words (${view.guessesLeft} left).`), UI.btn('Stop guessing', () => send({ type: 'pass' }), { size: 'sm' })));
     } else if (view.phase === 'clue') {
-      el.appendChild(UI.muted(`Waiting for ${view.players.find((p) => p.id === view.spymasters?.[view.team])?.name || 'the spymaster'}...`));
+      el.appendChild(UI.muted(`Waiting for ${view.players.find((p) => p.id === view.spymasterNow)?.name || 'the spymaster'}...`));
     }
     if (view.phase === 'reveal') el.appendChild(UI.btn('Continue', () => send({ type: 'next' }), { variant: 'primary', disabled: view.readies.includes(playerId) }));
     el.appendChild(UI.scoreboard(view));

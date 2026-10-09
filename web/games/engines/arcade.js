@@ -366,9 +366,11 @@ function pongAi(state, id, dt) {
 }
 
 function drawPong(ctx, w, h, snapshot) {
-  ctx.fillStyle = '#0b1020';
-  ctx.fillRect(0, 0, w, h);
-  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+  // A neon arena behind the court rather than a flat wash, so the paddles and
+  // the ball read as lights moving over a floor.
+  UI.arenaBackdrop(ctx, w, h, { palette: 'arcade', horizon: 0.58, stars: 30 });
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,255,255,0.24)';
   ctx.lineWidth = 2;
   ctx.setLineDash([8, 10]);
   ctx.beginPath();
@@ -376,32 +378,55 @@ function drawPong(ctx, w, h, snapshot) {
   ctx.lineTo(w / 2, h);
   ctx.stroke();
   ctx.setLineDash([]);
+  ctx.restore();
   const paddles = snapshot.paddles || {};
   const players = snapshot.players || [];
   for (const p of players) {
     const pad = paddles[p.id];
     if (!pad) continue;
     const grow = snapshot.effects?.grow?.team === pad.side ? 1.5 : 1;
-    ctx.fillStyle = pad.side === 'l' ? '#22d3ee' : '#f472b6';
-    ctx.fillRect(pad.x, pad.y, PADDLE_W, PADDLE_H * grow);
+    const color = pad.side === 'l' ? '#22d3ee' : '#f472b6';
+    UI.withGlow(ctx, color, 18, () => {
+      const grad = ctx.createLinearGradient(pad.x, 0, pad.x + PADDLE_W, 0);
+      grad.addColorStop(0, UI.shadeColor(color, 0.4));
+      grad.addColorStop(1, UI.shadeColor(color, -0.15));
+      ctx.fillStyle = grad;
+      UI.roundRect(ctx, pad.x, pad.y, PADDLE_W, PADDLE_H * grow, PADDLE_W / 2);
+      ctx.fill();
+    });
   }
   if (snapshot.pickup) {
-    ctx.fillStyle = snapshot.pickup.kind === 'grow' ? '#facc15' : '#a855f7';
-    ctx.beginPath();
-    ctx.arc(snapshot.pickup.x, snapshot.pickup.y, 11, 0, Math.PI * 2);
-    ctx.fill();
+    const color = snapshot.pickup.kind === 'grow' ? '#facc15' : '#a855f7';
+    UI.withGlow(ctx, color, 16, () => {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(snapshot.pickup.x, snapshot.pickup.y, 11, 0, Math.PI * 2);
+      ctx.fill();
+    });
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.font = 'bold 11px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(snapshot.pickup.kind === 'grow' ? '↕' : '🐢', snapshot.pickup.x, snapshot.pickup.y + 4);
+    ctx.textAlign = 'start';
   }
   const ball = snapshot.ball;
   if (ball) {
-    ctx.fillStyle = '#f8fafc';
-    ctx.beginPath();
-    ctx.arc(ball.x, ball.y, BALL_R, 0, Math.PI * 2);
-    ctx.fill();
+    UI.withGlow(ctx, '#f8fafc', 22, () => {
+      ctx.fillStyle = '#f8fafc';
+      ctx.beginPath();
+      ctx.arc(ball.x, ball.y, BALL_R, 0, Math.PI * 2);
+      ctx.fill();
+    });
   }
-  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,255,255,0.9)';
+  ctx.shadowColor = 'rgba(34,211,238,0.8)';
+  ctx.shadowBlur = 12;
   ctx.font = 'bold 34px system-ui, sans-serif';
   ctx.fillText(String(snapshot.score?.l ?? 0), w / 2 - 60, 52);
+  ctx.shadowColor = 'rgba(244,114,182,0.8)';
   ctx.fillText(String(snapshot.score?.r ?? 0), w / 2 + 40, 52);
+  ctx.restore();
 }
 
 /* ========================================================================= *
@@ -701,15 +726,18 @@ function invadeAi(state, id, dt) {
 }
 
 function drawInvade(ctx, w, h, snapshot) {
-  ctx.fillStyle = '#050816';
-  ctx.fillRect(0, 0, w, h);
+  UI.arenaBackdrop(ctx, w, h, { palette: 'arcade', horizon: 0.86, stars: 60 });
   const stars = snapshot.stars || [];
   ctx.fillStyle = 'rgba(255,255,255,0.5)';
   for (const star of stars) ctx.fillRect(star.x, star.y, 2, 2);
   for (const alien of snapshot.invaders || []) {
     if (!alien.alive) continue;
-    ctx.fillStyle = ['#4ade80', '#facc15', '#f472b6'][alien.kind % 3];
-    ctx.fillRect(alien.x, alien.y, ALIEN_W, ALIEN_H);
+    const color = ['#4ade80', '#facc15', '#f472b6'][alien.kind % 3];
+    UI.withGlow(ctx, color, 10, () => {
+      ctx.fillStyle = color;
+      UI.roundRect(ctx, alien.x, alien.y, ALIEN_W, ALIEN_H, 5);
+      ctx.fill();
+    });
     ctx.fillStyle = '#050816';
     ctx.fillRect(alien.x + 6, alien.y + 7, 6, 6);
     ctx.fillRect(alien.x + ALIEN_W - 12, alien.y + 7, 6, 6);
@@ -726,24 +754,33 @@ function drawInvade(ctx, w, h, snapshot) {
     ctx.fillRect(boss.x - 60, boss.y + 34, 120 * Math.max(0, boss.hp / boss.maxHp), 8);
   }
   ctx.fillStyle = '#facc15';
-  for (const bullet of snapshot.bullets || []) ctx.fillRect(bullet.x - 2, bullet.y - 10, 4, 12);
+  UI.withGlow(ctx, '#facc15', 12, () => {
+    for (const bullet of snapshot.bullets || []) ctx.fillRect(bullet.x - 2, bullet.y - 10, 4, 12);
+  });
   ctx.fillStyle = '#fb7185';
-  for (const bomb of snapshot.bombs || []) {
-    ctx.beginPath();
-    ctx.arc(bomb.x, bomb.y, 5, 0, Math.PI * 2);
-    ctx.fill();
-  }
+  UI.withGlow(ctx, '#fb7185', 10, () => {
+    for (const bomb of snapshot.bombs || []) {
+      ctx.beginPath();
+      ctx.arc(bomb.x, bomb.y, 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  });
   for (const p of snapshot.players || []) {
     const ship = snapshot.ships?.[p.id];
     if (!ship || (snapshot.lives?.[p.id] ?? 0) <= 0) continue;
     if (ship.inv > 0 && Math.floor(ship.inv * 10) % 2 === 0) continue;
-    ctx.fillStyle = '#38bdf8';
-    ctx.beginPath();
-    ctx.moveTo(ship.x, SHIP_Y - 16);
-    ctx.lineTo(ship.x - 18, SHIP_Y + 12);
-    ctx.lineTo(ship.x + 18, SHIP_Y + 12);
-    ctx.closePath();
-    ctx.fill();
+    UI.withGlow(ctx, '#38bdf8', 16, () => {
+      const grad = ctx.createLinearGradient(ship.x, SHIP_Y - 16, ship.x, SHIP_Y + 12);
+      grad.addColorStop(0, UI.shadeColor('#38bdf8', 0.35));
+      grad.addColorStop(1, UI.shadeColor('#38bdf8', -0.2));
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(ship.x, SHIP_Y - 16);
+      ctx.lineTo(ship.x - 18, SHIP_Y + 12);
+      ctx.lineTo(ship.x + 18, SHIP_Y + 12);
+      ctx.closePath();
+      ctx.fill();
+    });
   }
   ctx.fillStyle = 'rgba(255,255,255,0.75)';
   ctx.font = 'bold 16px system-ui, sans-serif';
@@ -996,14 +1033,25 @@ function royaleAi(state, id, dt) {
 }
 
 function drawRoyale(ctx, w, h, snapshot) {
-  ctx.fillStyle = '#080b1a';
-  ctx.fillRect(0, 0, w, h);
+  UI.arenaBackdrop(ctx, w, h, { palette: 'arcade', horizon: 0.4, stars: 70, grid: false });
   ctx.save();
   ctx.beginPath();
   ctx.arc(w / 2, h / 2, snapshot.zone?.r ?? 420, 0, Math.PI * 2);
-  ctx.strokeStyle = 'rgba(248,113,113,0.65)';
+  ctx.strokeStyle = 'rgba(248,113,113,0.75)';
   ctx.lineWidth = 3;
+  ctx.shadowColor = 'rgba(248,113,113,0.9)';
+  ctx.shadowBlur = 18;
   ctx.stroke();
+  ctx.restore();
+  // Inside the ring the floor grid says "still safe"; outside stays empty space.
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(w / 2, h / 2, snapshot.zone?.r ?? 420, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.strokeStyle = 'rgba(34,211,238,0.10)';
+  ctx.lineWidth = 1;
+  for (let x = 0; x < w; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); }
+  for (let y = 0; y < h; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); }
   ctx.restore();
   for (const rocket of snapshot.rockets || []) {
     ctx.strokeStyle = '#fbbf24';
@@ -1021,16 +1069,23 @@ function drawRoyale(ctx, w, h, snapshot) {
     ctx.save();
     ctx.translate(ship.x, ship.y);
     ctx.rotate(ship.angle);
-    ctx.fillStyle = p.id === snapshot.__me ? '#22d3ee' : '#e879f9';
-    ctx.beginPath();
-    ctx.moveTo(16, 0);
-    ctx.lineTo(-12, 10);
-    ctx.lineTo(-7, 0);
-    ctx.lineTo(-12, -10);
-    ctx.closePath();
-    ctx.fill();
+    const hull = p.id === snapshot.__me ? '#22d3ee' : '#e879f9';
+    UI.withGlow(ctx, hull, 14, () => {
+      const grad = ctx.createLinearGradient(-14, 0, 18, 0);
+      grad.addColorStop(0, UI.shadeColor(hull, -0.25));
+      grad.addColorStop(1, UI.shadeColor(hull, 0.4));
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(16, 0);
+      ctx.lineTo(-12, 10);
+      ctx.lineTo(-7, 0);
+      ctx.lineTo(-12, -10);
+      ctx.closePath();
+      ctx.fill();
+    });
     ctx.restore();
     ctx.fillStyle = 'rgba(255,255,255,0.2)';
+
     ctx.fillRect(ship.x - 16, ship.y - 24, 32, 4);
     ctx.fillStyle = '#4ade80';
     ctx.fillRect(ship.x - 16, ship.y - 24, 32 * Math.max(0, ship.hp / SHIP_HP), 4);
@@ -1385,43 +1440,88 @@ function bestSpinPhase(state, id, angle) {
 }
 
 function drawGolf(ctx, w, h, view, playerId, aim, live, spinPhase = null) {
-  ctx.fillStyle = '#14532d';
+  // The fairway: a green that falls off toward the edges with mown stripes over
+  // it, so the ball reads as sitting on grass and not on a flat swatch.
+  const grass = ctx.createLinearGradient(0, 0, 0, h);
+  grass.addColorStop(0, '#166534');
+  grass.addColorStop(0.55, '#15803d');
+  grass.addColorStop(1, '#14532d');
+  ctx.fillStyle = grass;
   ctx.fillRect(0, 0, w, h);
-  ctx.fillStyle = '#166534';
-  for (let i = 0; i < 5; i++) {
-    for (let j = 0; j < 4; j++) {
-      ctx.fillStyle = (i + j) % 2 === 0 ? '#166534' : '#15803d';
-      ctx.fillRect((w / 5) * i, (h / 4) * j, w / 5, h / 4);
-    }
+  const stripe = h / 9;
+  for (let i = 0; i < 9; i += 2) {
+    ctx.fillStyle = 'rgba(255,255,255,0.045)';
+    ctx.fillRect(0, i * stripe, w, stripe);
   }
   const holeDef = view.hole || HOLES[0];
-  ctx.strokeStyle = '#052e16';
-  ctx.lineWidth = 6;
-  for (const [x1, y1, x2, y2] of borderWalls().concat(holeDef.walls || [])) {
-    ctx.beginPath();
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x2, y2);
-    ctx.stroke();
-  }
+  // Each wall gets a soft shadow, a dark body and a lit edge - the classic
+  // three-pass trick that turns a flat line into something with a face.
+  const walls = borderWalls().concat(holeDef.walls || []);
+  ctx.save();
+  ctx.lineCap = 'round';
+  const strokeWalls = (style, width) => {
+    ctx.strokeStyle = style;
+    ctx.lineWidth = width;
+    for (const [x1, y1, x2, y2] of walls) {
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+    }
+  };
+  strokeWalls('rgba(2,20,10,0.45)', 13);
+  strokeWalls('#0b3b1e', 8);
+  strokeWalls('rgba(190,242,100,0.3)', 2);
+  ctx.restore();
   if (holeDef.spin) {
     const a = spinPhase !== null && spinPhase !== undefined ? spinPhase : (view.time || 0) * holeDef.spin.rate;
-    ctx.strokeStyle = '#f97316';
-    ctx.lineWidth = 10;
-    ctx.beginPath();
-    ctx.moveTo(holeDef.spin.x - Math.cos(a) * holeDef.spin.len / 2, holeDef.spin.y - Math.sin(a) * holeDef.spin.len / 2);
-    ctx.lineTo(holeDef.spin.x + Math.cos(a) * holeDef.spin.len / 2, holeDef.spin.y + Math.sin(a) * holeDef.spin.len / 2);
-    ctx.stroke();
+    UI.withGlow(ctx, '#f97316', 14, () => {
+      const bar = ctx.createLinearGradient(
+        holeDef.spin.x - Math.cos(a) * holeDef.spin.len / 2, holeDef.spin.y - Math.sin(a) * holeDef.spin.len / 2,
+        holeDef.spin.x + Math.cos(a) * holeDef.spin.len / 2, holeDef.spin.y + Math.sin(a) * holeDef.spin.len / 2,
+      );
+      bar.addColorStop(0, '#fb923c');
+      bar.addColorStop(1, '#ef4444');
+      ctx.strokeStyle = bar;
+      ctx.lineCap = 'round';
+      ctx.lineWidth = 10;
+      ctx.beginPath();
+      ctx.moveTo(holeDef.spin.x - Math.cos(a) * holeDef.spin.len / 2, holeDef.spin.y - Math.sin(a) * holeDef.spin.len / 2);
+      ctx.lineTo(holeDef.spin.x + Math.cos(a) * holeDef.spin.len / 2, holeDef.spin.y + Math.sin(a) * holeDef.spin.len / 2);
+      ctx.stroke();
+    });
   }
-  ctx.fillStyle = '#0f172a';
+  // The cup is a hole, not a dot: a dark well with a lit lip and a flag on a
+  // straight pole, so a player can find the target at a glance.
+  const cup = holeDef.cup;
+  const well = ctx.createRadialGradient(cup[0], cup[1] - CUP_R * 0.4, 1, cup[0], cup[1], CUP_R * 1.15);
+  well.addColorStop(0, '#020617');
+  well.addColorStop(1, '#0b1220');
+  ctx.fillStyle = well;
   ctx.beginPath();
-  ctx.arc(holeDef.cup[0], holeDef.cup[1], CUP_R, 0, Math.PI * 2);
+  ctx.arc(cup[0], cup[1], CUP_R, 0, Math.PI * 2);
   ctx.fill();
-  ctx.strokeStyle = '#f8fafc';
+  ctx.strokeStyle = 'rgba(248,250,252,0.75)';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(holeDef.cup[0], holeDef.cup[1] - CUP_R);
-  ctx.lineTo(holeDef.cup[0] + 18, holeDef.cup[1] - CUP_R - 26);
+  ctx.arc(cup[0], cup[1], CUP_R, 0, Math.PI * 2);
   ctx.stroke();
+  ctx.strokeStyle = '#e2e8f0';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(cup[0], cup[1]);
+  ctx.lineTo(cup[0], cup[1] - 48);
+  ctx.stroke();
+  const pennant = ctx.createLinearGradient(cup[0], 0, cup[0] + 26, 0);
+  pennant.addColorStop(0, '#ef4444');
+  pennant.addColorStop(1, '#f97316');
+  ctx.fillStyle = pennant;
+  ctx.beginPath();
+  ctx.moveTo(cup[0], cup[1] - 48);
+  ctx.lineTo(cup[0] + 26, cup[1] - 39);
+  ctx.lineTo(cup[0], cup[1] - 30);
+  ctx.closePath();
+  ctx.fill();
   if (view.shot?.path?.length) {
     ctx.strokeStyle = 'rgba(255,255,255,0.35)';
     ctx.setLineDash([4, 6]);
@@ -1435,10 +1535,28 @@ function drawGolf(ctx, w, h, view, playerId, aim, live, spinPhase = null) {
     const ball = view.ball?.[p.id];
     if (!ball) continue;
     if (view.holed?.[p.id]) continue;
-    ctx.fillStyle = p.id === playerId ? '#f8fafc' : '#fca5a5';
+    const mine = p.id === playerId;
+    const base = mine ? '#f8fafc' : '#fca5a5';
+    ctx.fillStyle = 'rgba(2,20,10,0.4)';
     ctx.beginPath();
-    ctx.arc(ball.x, ball.y, GOLF_BALL_R, 0, Math.PI * 2);
+    ctx.ellipse(ball.x + 2, ball.y + 3, GOLF_BALL_R, GOLF_BALL_R * 0.7, 0, 0, Math.PI * 2);
     ctx.fill();
+    UI.withGlow(ctx, base, mine ? 12 : 6, () => {
+      const face = ctx.createRadialGradient(ball.x - 2, ball.y - 3, 1, ball.x, ball.y, GOLF_BALL_R);
+      face.addColorStop(0, '#ffffff');
+      face.addColorStop(1, base);
+      ctx.fillStyle = face;
+      ctx.beginPath();
+      ctx.arc(ball.x, ball.y, GOLF_BALL_R, 0, Math.PI * 2);
+      ctx.fill();
+    });
+    if (mine) {
+      ctx.strokeStyle = 'rgba(15,23,42,0.5)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(ball.x, ball.y, GOLF_BALL_R, 0, Math.PI * 2);
+      ctx.stroke();
+    }
   }
   if (aim && live?.me) {
     const ball = view.ball[live.me];
@@ -1446,12 +1564,22 @@ function drawGolf(ctx, w, h, view, playerId, aim, live, spinPhase = null) {
     const dy = aim.y - ball.y;
     const dist = Math.min(Math.hypot(dx, dy), 220);
     const angle = Math.atan2(dy, dx);
+    ctx.save();
     ctx.strokeStyle = '#fde68a';
     ctx.lineWidth = 3;
+    ctx.setLineDash([9, 6]);
     ctx.beginPath();
     ctx.moveTo(ball.x, ball.y);
     ctx.lineTo(ball.x + Math.cos(angle) * dist, ball.y + Math.sin(angle) * dist);
     ctx.stroke();
+    ctx.setLineDash([]);
+    // A power ring at the ball: the dashed line says where, this says how hard.
+    ctx.strokeStyle = UI.withAlpha('#fde68a', 0.35 + 0.55 * (dist / 220));
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(ball.x, ball.y, GOLF_BALL_R + 4, 0, Math.PI * 2 * (dist / 220));
+    ctx.stroke();
+    ctx.restore();
     ctx.fillStyle = '#fde68a';
     ctx.font = 'bold 14px system-ui, sans-serif';
     ctx.fillText(`${Math.round((dist / 220) * 100)}%`, ball.x + Math.cos(angle) * (dist + 16) - 10, ball.y + Math.sin(angle) * (dist + 16));

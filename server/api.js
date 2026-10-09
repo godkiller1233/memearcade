@@ -77,6 +77,7 @@ import {
 import { publicConfig, catalogFor as catalogForAccount } from './lib/public-config.js';
 import { onlineCount } from './lib/presence.js';
 import { metaPayload, negotiate, APP_NAME, APP_VERSION, API_VERSION, MIN_CLIENT_VERSION } from '../shared/version.js';
+import { buildStamp } from './lib/build.js';
 import { downloadManifest, getDownload } from './lib/downloads.js';
 import { id as newId, now } from './lib/ids.js';
 import { GAMES, catalogWithEngines } from '../web/games/registry.js';
@@ -232,6 +233,15 @@ export function registerApi(app, { rooms, hub }) {
     online: onlineCount(),
     engines: engineCatalog().length,
   }));
+
+  /**
+   * The build the server is serving, on its own so a watching client can ask
+   * cheaply and often (no catalog, no negotiation).  `send()` is already
+   * `no-store`, so a proxy can never answer this with a stale stamp.  The same
+   * value rides the welcome handshake and every config push; this is the
+   * backstop for a tab whose socket is quiet.
+   */
+  app.get('/api/build', () => ({ ok: true, build: buildStamp() }));
 
   app.get('/api/meta', (ctx) => {
     const client = clientOf(ctx);

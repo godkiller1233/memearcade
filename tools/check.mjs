@@ -11,10 +11,13 @@
  *  5. verifies the feature-switch descriptors and the scheduled-window
  *     resolver (an over-midnight or day-of-week bug there would close a
  *     feature at the wrong hour everywhere at once)
+ *  6. verifies the build stamp: stable while nothing ships, and moved by any
+ *     served asset or MEMES_REVISION (it is what tells an open tab to reload)
  *
  * Exit code is non-zero when anything fails, so it doubles as CI.
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -39,7 +42,7 @@ function walk(dir, out = []) {
   return out;
 }
 
-console.log('\n[1/5] syntax check');
+console.log('\n[1/6] syntax check');
 const files = walk(ROOT);
 for (const file of files) {
   try {
@@ -52,7 +55,7 @@ for (const file of files) {
 }
 report(true, `${files.length} javascript files parsed`);
 
-console.log('\n[2/4] engine modules import cleanly in Node');
+console.log('\n[2/6] engine modules import cleanly in Node');
 const engineFiles = fs.existsSync(ENGINE_DIR)
   ? fs.readdirSync(ENGINE_DIR).filter((f) => f.endsWith('.js') && !['util.js', 'ui.js', 'index.js', 'art.js'].includes(f))
   : [];
@@ -92,7 +95,7 @@ for (const file of engineFiles) {
 }
 if (!engineFiles.length) console.log('  (no engine files yet)');
 
-console.log('\n[3/5] catalog ↔ engine wiring');
+console.log('\n[3/6] catalog ↔ engine wiring');
 const registry = await import(pathToFileURL(path.join(ROOT, 'web', 'games', 'registry.js')).href);
 const listed = registry.GAMES.filter((g) => g.engine);
 const missing = listed.filter((g) => !loaded.has(g.engine));
@@ -101,7 +104,7 @@ report(true, `${registry.GAMES.length} catalog entries, ${loaded.size} engines i
 if (missing.length) console.log(`  note  ${missing.length} catalog games await their engine: ${missing.map((g) => g.id).join(', ')}`);
 if (orphan.length) report(false, 'engines with no catalog entry', orphan.join(', '));
 
-console.log('\n[4/5] client ↔ server version agreement');
+console.log('\n[4/6] client ↔ server version agreement');
 const shared = await import(pathToFileURL(path.join(ROOT, 'shared', 'version.js')).href);
 const webStore = await import(pathToFileURL(path.join(ROOT, 'web', 'js', 'store.js')).href);
 report(webStore.CLIENT_VERSION === shared.APP_VERSION, 'web client version matches the app version', `${webStore.CLIENT_VERSION} vs ${shared.APP_VERSION}`);
@@ -121,7 +124,7 @@ report(badGroups.length === 0, 'every feature belongs to a declared group', badG
 const dupes = featureMod.FEATURE_IDS.filter((id, i) => featureMod.FEATURE_IDS.indexOf(id) !== i);
 report(dupes.length === 0, 'feature ids are unique', dupes.join(', '));
 
-console.log('\n[5/5] scheduled feature windows and role keep-floors');
+console.log('\n[5/6] scheduled feature windows and role keep-floors');
 
 // Fixed local dates: 2026-10-07 is a Wednesday, so these never depend on when
 // CI runs or which timezone it runs in.
@@ -201,6 +204,54 @@ report(/kept for VIPs/.test(featureMod.gameRefusal(roleConfig, 'pong', 'Ping Pon
 report(featureMod.KEEP_ROLES.includes('user') && featureMod.KEEP_ROLES.includes('owner') && !featureMod.KEEP_ROLES.includes('guest'), 'the offered rungs run user..owner, never guest');
 report(featureMod.featureKeepRole({}, 'not-a-feature') === 'mod' && featureMod.featureKept({}, 'not-a-feature', 'guest') === false, 'an unknown id reads as the staff default, never as a raised floor');
 report(Object.keys(featureMod.KEEP_ROLE_LABELS).length === featureMod.KEEP_ROLES.length, 'every rung has a console label');
+
+console.log('\n[6/6] build stamp');
+
+// The stamp is what tells an open tab that a new build is being served.  It
+// must stay put while nothing changes (or every client would reload for no
+// reason) and move for any shipped asset (or nobody would ever reload).
+const buildMod = await import(pathToFileURL(path.join(ROOT, 'server', 'lib', 'build.js')).href);
+const assetDir = fs.mkdtempSync(path.join(os.tmpdir(), 'memes-stamp-'));
+const realAssetDir = process.env.MEMES_ASSET_DIR;
+const realRevision = process.env.MEMES_REVISION;
+try {
+  delete process.env.MEMES_REVISION;
+  process.env.MEMES_ASSET_DIR = assetDir;
+  fs.writeFileSync(path.join(assetDir, 'app.js'), 'one');
+  fs.mkdirSync(path.join(assetDir, 'css'));
+  fs.writeFileSync(path.join(assetDir, 'css', 'app.css'), 'two');
+  fs.writeFileSync(path.join(assetDir, 'notes.txt'), 'not an asset');
+  const first = buildMod.buildStamp({ force: true });
+  report(/^[0-9a-f]{8,}$/.test(first), 'the stamp is a short hex id', first);
+  report(buildMod.buildStamp({ force: true }) === first, 'the same assets stamp the same build');
+  report(buildMod.buildStamp() === first, 'the memo answers with the same stamp inside its window');
+  fs.writeFileSync(path.join(assetDir, 'notes.txt'), 'still not an asset');
+  report(buildMod.buildStamp({ force: true }) === first, 'a file that is not served does not move the stamp');
+  fs.writeFileSync(path.join(assetDir, 'app.js'), 'one, but edited');
+  const edited = buildMod.buildStamp({ force: true });
+  report(edited !== first, 'editing a served asset moves the stamp');
+  fs.mkdirSync(path.join(assetDir, 'deeper'));
+  fs.writeFileSync(path.join(assetDir, 'deeper', 'engine.js'), 'three');
+  const added = buildMod.buildStamp({ force: true });
+  report(added !== edited, 'a new engine moves the stamp');
+  fs.rmSync(path.join(assetDir, 'deeper'), { recursive: true, force: true });
+  report(buildMod.buildStamp({ force: true }) === edited, 'deleting it puts the stamp back');
+  process.env.MEMES_REVISION = 'abc123';
+  const revised = buildMod.buildStamp({ force: true });
+  report(revised !== edited, 'MEMES_REVISION moves the stamp even when no file changed');
+  delete process.env.MEMES_REVISION;
+  report(buildMod.buildStamp({ force: true }) === edited, 'clearing MEMES_REVISION puts it back');
+  delete process.env.MEMES_ASSET_DIR;
+  const live = buildMod.buildStamp({ force: true });
+  report(/^[0-9a-f]{8,}$/.test(live) && live !== edited, 'the real web tree stamps its own build', live);
+  report(live === buildMod.buildStamp({ force: true }), 'the real tree is stable between reads');
+} finally {
+  if (realAssetDir === undefined) delete process.env.MEMES_ASSET_DIR;
+  else process.env.MEMES_ASSET_DIR = realAssetDir;
+  if (realRevision === undefined) delete process.env.MEMES_REVISION;
+  else process.env.MEMES_REVISION = realRevision;
+  fs.rmSync(assetDir, { recursive: true, force: true });
+}
 
 console.log(`\n${failures ? `✗ ${failures} failure(s)` : '✓ all checks passed'}\n`);
 process.exit(failures ? 1 : 0);

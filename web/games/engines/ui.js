@@ -85,15 +85,29 @@ function cleanupIntervals(el) {
   intervals.delete(el);
 }
 
-/** Stop timers/animation frames started by a render pass. */
+/**
+ * Stop timers/animation frames started by a render pass.
+ *
+ * The walk is over the whole subtree on purpose.  A render pass hands its
+ * cleanup back to the caller, which parks it on the mount's first child, but a
+ * game is free to register a loop on any node it built - the realtime stage
+ * keys its 33ms world tick on its own `.realtime-wrap`, one level down.  Missing
+ * a descendant left that loop ticking for the life of the tab, stepping a world
+ * nobody could see and repainting a detached canvas at 30fps.
+ */
 export function cleanupTree(el) {
-  cleanupIntervals(el);
-  if (el && typeof el.__cleanup === 'function') {
-    try {
-      el.__cleanup();
-    } catch {}
-    el.__cleanup = null;
-  }
+  if (!el) return;
+  const walk = (node) => {
+    cleanupIntervals(node);
+    if (typeof node.__cleanup === 'function') {
+      try {
+        node.__cleanup();
+      } catch {}
+      node.__cleanup = null;
+    }
+    for (const child of node.children || []) walk(child);
+  };
+  walk(el);
 }
 
 /* -------------------------------- primitives ------------------------------- */
@@ -253,27 +267,46 @@ export function gridButton(content, onClick, { className = '', disabled = false,
 
 /* --------------------------------- canvas --------------------------------- */
 
-export function canvasBox(width, height, drawFn, { className = '', scale = 1 } = {}) {
+/**
+ * How many device pixels one canvas unit gets.  A canvas whose backing store is
+ * 1:1 with CSS pixels is drawn by the compositor at whatever ratio the screen
+ * has - on a HiDPI display that makes every paddle, sprite and line mushy.  The
+ * backing store is therefore scaled by the device pixel ratio (capped, so a 3x
+ * phone does not pay 9x the fill rate) while engines keep drawing in their own
+ * logical width/height.  Nothing reads canvas.width for hit-testing (pointer
+ * maths goes through getBoundingClientRect and normalised coordinates), so the
+ * only thing this changes is how sharp the art is.
+ */
+export function pixelRatio(cap = 3) {
+  if (typeof window === 'undefined') return 1;
+  const dpr = Number(window.devicePixelRatio) || 1;
+  return Math.min(cap, Math.max(1, dpr));
+}
+
+export function canvasBox(width, height, drawFn, { className = '', scale = 1, crisp = true } = {}) {
+  const dpr = crisp ? pixelRatio() : 1;
+  const factor = scale * dpr;
   const canvas = h('canvas', {
     class: `game-canvas ${className}`,
-    width: Math.round(width * scale),
-    height: Math.round(height * scale),
+    width: Math.round(width * factor),
+    height: Math.round(height * factor),
   });
   canvas.style.width = '100%';
-  canvas.style.maxWidth = `${width}px`;
+  canvas.style.maxWidth = `${width * scale}px`;
   canvas.style.aspectRatio = `${width} / ${height}`;
   const ctx = canvas.getContext('2d');
-  if (ctx && scale !== 1) ctx.scale(scale, scale);
+  if (ctx && factor !== 1) ctx.scale(factor, factor);
   const api = {
     el: canvas,
     canvas,
     ctx,
     width,
     height,
+    dpr,
     redraw() {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      if (scale !== 1) ctx.scale(scale, scale);
+      if (factor !== 1) ctx.scale(factor, factor);
       drawFn?.(ctx, width, height);
     },
   };
@@ -548,27 +581,43 @@ export function drawingPad({
   };
 }
 
+/**
+ * Replay normalised strokes onto a canvas.
+ *
+ * Pointer events arrive as a coarse polyline, so a raw lineTo chain draws
+ * visible corners - especially after the same stroke is scaled down into a
+ * gallery thumb.  A quadratic through each midpoint keeps every stored point
+ * (so nothing is invented) while turning the capture into a drawn-looking
+ * curve; the ends still get a round cap and a single tap still becomes a dot.
+ */
 export function drawStrokes(ctx, strokes, w, h) {
+  ctx.save();
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
   for (const stroke of strokes) {
     if (!stroke?.pts?.length) continue;
+    const pts = stroke.pts.map(([x, y]) => [x * w, y * h]);
+    const lineWidth = (stroke.width || 5) * Math.min(w, h) / 420;
     ctx.strokeStyle = stroke.color || '#111827';
-    ctx.lineWidth = (stroke.width || 5) * Math.min(w, h) / 420;
-    if (stroke.fill) {
-      ctx.fillStyle = stroke.fill;
-    }
-    ctx.beginPath();
-    ctx.moveTo(stroke.pts[0][0] * w, stroke.pts[0][1] * h);
-    for (const [x, y] of stroke.pts.slice(1)) ctx.lineTo(x * w, y * h);
-    if (stroke.pts.length === 1) {
-      ctx.arc(stroke.pts[0][0] * w, stroke.pts[0][1] * h, Math.max(1, ctx.lineWidth / 2), 0, Math.PI * 2);
+    ctx.lineWidth = lineWidth;
+    if (stroke.fill) ctx.fillStyle = stroke.fill;
+    if (pts.length === 1) {
+      ctx.beginPath();
+      ctx.arc(pts[0][0], pts[0][1], Math.max(1, lineWidth / 2), 0, Math.PI * 2);
       ctx.fillStyle = stroke.color || '#111827';
       ctx.fill();
-    } else {
-      ctx.stroke();
+      continue;
     }
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length - 1; i++) {
+      ctx.quadraticCurveTo(pts[i][0], pts[i][1], (pts[i][0] + pts[i + 1][0]) / 2, (pts[i][1] + pts[i + 1][1]) / 2);
+    }
+    const last = pts[pts.length - 1];
+    ctx.lineTo(last[0], last[1]);
+    ctx.stroke();
   }
+  ctx.restore();
 }
 
 export function paletteRow(onPick, current, colors = null) {
@@ -659,25 +708,142 @@ export const PALETTES = {
   candy: ['#ffd6e0', '#ff85a1', '#fbb1bd', '#b8f2e6', '#aed9e0'],
 };
 
+/** #rrggbb (or #rgb) at a given alpha, as an rgba() string. */
+export function withAlpha(color, alpha) {
+  const hex = String(color || '#000').replace('#', '');
+  const full = hex.length === 3 ? hex.split('').map((c) => c + c).join('') : hex.padEnd(6, '0').slice(0, 6);
+  const num = parseInt(full, 16);
+  if (Number.isNaN(num)) return color;
+  return `rgba(${(num >> 16) & 255}, ${(num >> 8) & 255}, ${num & 255}, ${Math.max(0, Math.min(1, alpha))})`;
+}
+
+/**
+ * The shared neon arena behind the action games: gradient sky, dust, a horizon
+ * glow and a perspective floor grid.  Every value comes from a hash of the
+ * pixel's index rather than Math.random, so a stage that repaints twenty times
+ * a second never shimmers.  Returns the palette it used.
+ */
+export function arenaBackdrop(ctx, w, h, { palette = 'arcade', grid = true, stars = 46, horizon = 0.74 } = {}) {
+  const colors = PALETTES[palette] || PALETTES.arcade;
+  const rnd = (i, salt) => {
+    const n = Math.sin(i * 12.9898 + salt * 78.233) * 43758.5453;
+    return n - Math.floor(n);
+  };
+  const sky = ctx.createLinearGradient(0, 0, 0, h);
+  sky.addColorStop(0, shadeColor(colors[0], -0.42));
+  sky.addColorStop(0.6, colors[0]);
+  sky.addColorStop(1, shadeColor(colors[0], 0.1));
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, w, h);
+
+  const hy = h * horizon;
+  for (let i = 0; i < stars; i++) {
+    const x = rnd(i, 1) * w;
+    const y = rnd(i, 2) * hy * 0.96;
+    const s = rnd(i, 3) < 0.78 ? 1 : 2;
+    ctx.globalAlpha = 0.16 + rnd(i, 4) * 0.48;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(x, y, s, s);
+  }
+  ctx.globalAlpha = 1;
+
+  const glow = ctx.createLinearGradient(0, hy - h * 0.24, 0, hy + h * 0.1);
+  glow.addColorStop(0, 'rgba(0,0,0,0)');
+  glow.addColorStop(0.7, withAlpha(colors[1], 0.32));
+  glow.addColorStop(1, withAlpha(colors[2] || colors[1], 0.5));
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, hy - h * 0.24, w, h * 0.34);
+
+  if (grid) {
+    ctx.save();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = withAlpha(colors[2] || colors[1], 0.3);
+    const rows = 9;
+    for (let i = 0; i <= rows; i++) {
+      const t = i / rows;
+      const y = hy + (h - hy) * t * t;
+      ctx.globalAlpha = 0.55 * (1 - t * 0.5);
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(w, y);
+      ctx.stroke();
+    }
+    const cols = 12;
+    for (let i = 0; i <= cols; i++) {
+      const t = i / cols - 0.5;
+      ctx.globalAlpha = 0.4;
+      ctx.beginPath();
+      ctx.moveTo(w / 2 + t * w * 0.35, hy);
+      ctx.lineTo(w / 2 + t * w * 2.4, h);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  const vig = ctx.createRadialGradient(w / 2, h * 0.46, Math.min(w, h) * 0.3, w / 2, h * 0.5, Math.max(w, h) * 0.8);
+  vig.addColorStop(0, 'rgba(0,0,0,0)');
+  vig.addColorStop(1, 'rgba(0,0,0,0.45)');
+  ctx.fillStyle = vig;
+  ctx.fillRect(0, 0, w, h);
+  return colors;
+}
+
 /**
  * Deterministic procedural scene painter.  Used by Spot the Difference,
  * Zoomed Image, Prompt Guessing and the drawing game backgrounds.
+ *
+ * The backdrop uses its own RNG stream (`seed ^ 0x9e3779b9`) so the shape list -
+ * which other games diff, count and reason about - never changes when the
+ * background art does.
  */
 export function paintScene(ctx, w, h, seed, { palette = 'neon', density = 22, subject = null } = {}) {
   const rng = makeRng(seed);
   const colors = PALETTES[palette] || PALETTES.neon;
-  ctx.fillStyle = colors[0];
+  const backdrop = makeRng(seed ^ 0x9e3779b9);
+  // Sky: a vertical gradient instead of one flat fill, so a scene has depth.
+  const sky = ctx.createLinearGradient(0, 0, 0, h);
+  sky.addColorStop(0, shadeColor(colors[0], 0.06));
+  sky.addColorStop(0.62, colors[0]);
+  sky.addColorStop(1, shadeColor(colors[0], -0.22));
+  ctx.fillStyle = sky;
   ctx.fillRect(0, 0, w, h);
 
   // soft background blobs
   for (let i = 0; i < 5; i++) {
-    const grd = ctx.createRadialGradient(rng() * w, rng() * h, 4, rng() * w, rng() * h, w * 0.5);
-    grd.addColorStop(0, colors[1 + Math.floor(rng() * (colors.length - 1))]);
+    const grd = ctx.createRadialGradient(backdrop() * w, backdrop() * h, 4, backdrop() * w, backdrop() * h, w * 0.5);
+    grd.addColorStop(0, colors[1 + Math.floor(backdrop() * (colors.length - 1))]);
     grd.addColorStop(1, 'transparent');
     ctx.globalAlpha = 0.22;
     ctx.fillStyle = grd;
     ctx.fillRect(0, 0, w, h);
   }
+  ctx.globalAlpha = 1;
+
+  // A faint grid + stars behind the shapes: the "somebody drew this" cue that a
+  // bare gradient misses.
+  ctx.save();
+  ctx.strokeStyle = shadeColor(colors[1], 0.1);
+  ctx.globalAlpha = 0.09;
+  ctx.lineWidth = 1;
+  const cells = 8;
+  for (let i = 1; i < cells; i++) {
+    ctx.beginPath();
+    ctx.moveTo((i / cells) * w, 0);
+    ctx.lineTo((i / cells) * w, h);
+    ctx.moveTo(0, (i / cells) * h);
+    ctx.lineTo(w, (i / cells) * h);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 0.5;
+  ctx.fillStyle = '#ffffff';
+  for (let i = 0; i < 40; i++) {
+    const x = backdrop() * w;
+    const y = backdrop() * h;
+    const s = backdrop() < 0.8 ? 1 : 2;
+    ctx.globalAlpha = 0.15 + backdrop() * 0.45;
+    ctx.fillRect(x, y, s, s);
+  }
+  ctx.restore();
   ctx.globalAlpha = 1;
 
   const shapes = [];
@@ -691,53 +857,165 @@ export function paintScene(ctx, w, h, seed, { palette = 'neon', density = 22, su
     shapes.push({ type, cx, cy, size, color, rot, alpha: 0.65 + rng() * 0.35 });
     drawShape(ctx, type, cx, cy, size, color, rot, 0.8);
   }
+  // A vignette closes the frame: dark corners make the middle read as lit.
+  const vig = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.32, w / 2, h / 2, Math.max(w, h) * 0.78);
+  vig.addColorStop(0, 'rgba(0,0,0,0)');
+  vig.addColorStop(1, 'rgba(0,0,0,0.38)');
+  ctx.fillStyle = vig;
+  ctx.fillRect(0, 0, w, h);
+  if (subject) {
+    // A soft spotlight behind whatever the scene is "about".
+    const spot = ctx.createRadialGradient(w * subject.x, h * subject.y, 2, w * subject.x, h * subject.y, Math.min(w, h) * 0.45);
+    spot.addColorStop(0, shadeColor(colors[3] || colors[1], 0.25));
+    spot.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.globalAlpha = 0.3;
+    ctx.fillStyle = spot;
+    ctx.fillRect(0, 0, w, h);
+    ctx.globalAlpha = 1;
+  }
   return { shapes, colors, seed };
 }
 
+/**
+ * Draw one procedural shape with a little depth: a light-from-the-top-left
+ * fill, a darker rim and a soft highlight.  Flat silhouettes read as "programmer
+ * art" at any size, so the extra fill/stroke is worth the few draw calls.
+ * `type` keeps its original 0-4 meaning - scenes are random and deterministic
+ * per seed, and swapping the shapes would rewrite every stored scene.
+ */
 export function drawShape(ctx, type, cx, cy, size, color, rot = 0, alpha = 1) {
   ctx.save();
   ctx.translate(cx, cy);
   ctx.rotate(rot);
   ctx.globalAlpha = alpha;
-  ctx.fillStyle = color;
-  ctx.strokeStyle = color;
-  ctx.lineWidth = Math.max(1, size * 0.12);
-  switch (type) {
-    case 0:
-      ctx.beginPath();
-      ctx.arc(0, 0, size / 2, 0, Math.PI * 2);
-      ctx.fill();
-      break;
-    case 1:
-      ctx.fillRect(-size / 2, -size / 2, size, size * (0.5 + 0.5 * Math.abs(Math.sin(rot))));
-      break;
-    case 2:
-      ctx.beginPath();
-      ctx.moveTo(0, -size / 2);
-      ctx.lineTo(size / 2, size / 2);
-      ctx.lineTo(-size / 2, size / 2);
-      ctx.closePath();
-      ctx.fill();
-      break;
-    case 3:
-      ctx.beginPath();
-      for (let i = 0; i < 5; i++) {
-        const a = (i / 5) * Math.PI * 2 - Math.PI / 2;
-        const x = Math.cos(a) * size * 0.8;
-        const y = Math.sin(a) * size * 0.8;
-        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  ctx.lineJoin = 'round';
+  // Depth: a bright core toward the top-left, shade toward the bottom-right.
+  const shade = shadeColor(color, -0.32);
+  const light = shadeColor(color, 0.42);
+  const fill = ctx.createRadialGradient(-size * 0.22, -size * 0.28, size * 0.05, 0, 0, size * 0.72);
+  fill.addColorStop(0, light);
+  fill.addColorStop(0.55, color);
+  fill.addColorStop(1, shade);
+  ctx.fillStyle = fill;
+  ctx.strokeStyle = shade;
+  ctx.lineWidth = Math.max(1, size * 0.06);
+  const glossy = size >= 26;
+  const path = () => {
+    switch (type) {
+      case 0:
+        ctx.beginPath();
+        ctx.arc(0, 0, size / 2, 0, Math.PI * 2);
+        break;
+      case 1: {
+        const h2 = size * (0.5 + 0.5 * Math.abs(Math.sin(rot)));
+        const r = Math.min(size, h2) * 0.18;
+        roundRect(ctx, -size / 2, -h2 / 2, size, h2, r);
+        break;
       }
-      ctx.closePath();
-      ctx.fill();
-      break;
-    default:
-      ctx.beginPath();
-      ctx.arc(0, 0, size / 2, 0, Math.PI * 1.5);
-      ctx.stroke();
-      break;
+      case 2:
+        ctx.beginPath();
+        ctx.moveTo(0, -size / 2);
+        ctx.quadraticCurveTo(size * 0.06, -size * 0.1, size / 2, size / 2);
+        ctx.lineTo(0, size / 2 - size * 0.12);
+        ctx.lineTo(-size / 2, size / 2);
+        ctx.closePath();
+        break;
+      case 3:
+        starPath(ctx, size * 0.82, size * 0.38, 5);
+        break;
+      default: {
+        // A ring with a gap: two arcs so it reads as a deliberate shape.
+        ctx.beginPath();
+        ctx.arc(0, 0, size / 2, 0.5, Math.PI * 1.62);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = Math.max(2, size * 0.16);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(0, 0, size / 2, 0.5, Math.PI * 1.62);
+        ctx.strokeStyle = light;
+        ctx.lineWidth = Math.max(1, size * 0.05);
+        ctx.stroke();
+        ctx.restore();
+        ctx.globalAlpha = 1;
+        return;
+      }
+    }
+    ctx.fill();
+    ctx.stroke();
+  };
+  if (glossy) {
+    ctx.save();
+    ctx.shadowColor = color;
+    ctx.shadowBlur = size * 0.35;
+    path();
+    ctx.restore();
+  } else {
+    path();
+  }
+  // Specular glint, only on the shapes big enough to show one.
+  if (glossy) {
+    ctx.globalAlpha = alpha * 0.35;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.ellipse(-size * 0.18, -size * 0.24, size * 0.16, size * 0.1, rot * 0.5, 0, Math.PI * 2);
+    ctx.fill();
   }
   ctx.restore();
   ctx.globalAlpha = 1;
+}
+
+/** Rounded rectangle path (older engines draw their own; this keeps it shared). */
+export function roundRect(ctx, x, y, w, h, r = 6) {
+  const rr = Math.max(0, Math.min(r, Math.min(w, h) / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.lineTo(x + w - rr, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+  ctx.lineTo(x + w, y + h - rr);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+  ctx.lineTo(x + rr, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+  ctx.lineTo(x, y + rr);
+  ctx.quadraticCurveTo(x, y, x + rr, y);
+  ctx.closePath();
+}
+
+/** A classic five-point star (outer/inner radius) as a path. */
+export function starPath(ctx, outer, inner, points = 5) {
+  ctx.beginPath();
+  for (let i = 0; i < points * 2; i++) {
+    const a = (i / (points * 2)) * Math.PI * 2 - Math.PI / 2;
+    const r = i % 2 ? inner : outer;
+    const x = Math.cos(a) * r;
+    const y = Math.sin(a) * r;
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  }
+  ctx.closePath();
+}
+
+/** Lighten (`amount > 0`) or darken a #rgb/#rrggbb colour, clamped. */
+export function shadeColor(color, amount) {
+  const hex = String(color || '#000').replace('#', '');
+  const full = hex.length === 3 ? hex.split('').map((c) => c + c).join('') : hex.padEnd(6, '0').slice(0, 6);
+  const num = parseInt(full, 16);
+  if (Number.isNaN(num)) return color;
+  const mix = (v) => Math.round(Math.max(0, Math.min(255, v + 255 * amount)));
+  const r = mix((num >> 16) & 255);
+  const g = mix((num >> 8) & 255);
+  const b = mix(num & 255);
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+/**
+ * Run a draw call under a neon glow.  Used by the arcade games for the sprites
+ * that should read as "lit" - paddles, ships, bullets, balls.
+ */
+export function withGlow(ctx, color, blur, draw) {
+  ctx.save();
+  ctx.shadowColor = color;
+  ctx.shadowBlur = blur;
+  draw();
+  ctx.restore();
 }
 
 export default {
@@ -745,4 +1023,5 @@ export default {
   keyboardControls, realtimeControls, realtimeHint, withLive, animLoop,
   drawingPad, drawStrokes, scoreboard, turnBanner, logView, chatBox, inputRow, textareaRow,
   paintScene, PALETTES, pill, badge, muted, promptCard, spinnerRow, choice, avatarBubble,
+  pixelRatio, arenaBackdrop, withGlow, roundRect, starPath, shadeColor, withAlpha,
 };

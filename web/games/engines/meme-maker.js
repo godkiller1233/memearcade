@@ -152,15 +152,25 @@ export const memeMaker = {
       UI.pill(view.phase === 'submit' ? 'Caption it' : view.phase === 'vote' ? 'Vote' : 'Results')));
     const template = (top, bottom) => UI.canvasBox(420, 260, (ctx, w, h) => {
       UI.paintScene(ctx, w, h, view.template.seed, { palette: view.template.palette, density: 14 });
-      ctx.fillStyle = '#fff';
-      ctx.strokeStyle = '#000';
-      ctx.lineWidth = 4;
-      ctx.font = 'bold 26px "Segoe UI", system-ui, sans-serif';
       ctx.textAlign = 'center';
+      ctx.lineJoin = 'round';
+      // Captions shrink to fit the panel instead of being guillotined at a fixed
+      // character count, and carry the heavy outline the format is known for.
       const line = (text, y) => {
-        if (!text) return;
-        ctx.strokeText(text.slice(0, 34), w / 2, y);
-        ctx.fillText(text.slice(0, 34), w / 2, y);
+        const raw = String(text || '').trim().toUpperCase();
+        if (!raw) return;
+        const maxW = w - 28;
+        const setFont = (size) => { ctx.font = `bold ${size}px "Segoe UI", Impact, system-ui, sans-serif`; };
+        let size = 30;
+        setFont(size);
+        while (size > 12 && ctx.measureText(raw).width > maxW) setFont(size -= 2);
+        let shown = raw;
+        while (shown.length > 1 && ctx.measureText(shown).width > maxW) shown = shown.slice(0, -1);
+        ctx.lineWidth = Math.max(3, size * 0.24);
+        ctx.strokeStyle = 'rgba(0,0,0,0.92)';
+        ctx.strokeText(shown, w / 2, y);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(shown, w / 2, y);
       };
       line(top, 40);
       line(bottom, h - 20);

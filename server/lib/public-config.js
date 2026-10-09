@@ -14,12 +14,17 @@
  * gets the strictest view.
  */
 import { db } from './db.js';
+import { buildStamp } from './build.js';
 import { engineCatalog } from '../games.js';
 import { catalogWithEngines } from '../../web/games/registry.js';
 import { featureFlags, gameKept, gameState } from '../../shared/features.js';
 
 export function publicConfig(account = null) {
   return {
+    // Which build the server is serving.  A client keeps this as "the build I
+    // booted from" and reloads when a later answer differs (web/js/build-watch.js),
+    // which is how a shipped art or engine change ever reaches an open tab.
+    build: buildStamp(),
     registrationsOpen: db.data.config.registrationsOpen,
     maintenance: db.data.config.maintenance,
     motd: db.data.config.motd,
