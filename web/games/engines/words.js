@@ -69,6 +69,8 @@ const HANGMAN_WORDS = {
 export const hangman = {
   meta: {
     id: 'hangman',
+    // Solved words score, dud letters cost - so a good run is a high one.
+    record: { best: 'high', label: 'points' },
     name: 'Hangman',
     category: 'board',
     players: { min: 1, max: 8 },
@@ -427,6 +429,8 @@ const STORY_POINTS = [10, 6, 3];
 export const guessTheStory = {
   meta: {
     id: 'guess-the-story',
+    // Earlier clues are worth more, so a high total means a sharp deduction.
+    record: { best: 'high', label: 'points' },
     name: 'Guess the Story',
     category: 'party',
     players: { min: 1, max: 12 },

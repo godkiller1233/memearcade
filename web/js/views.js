@@ -3,10 +3,13 @@
  * cleanups in ctx.onCleanup so switching views tears down timers/hosts.
  */
 import { el, btn, pill, avatar, toast, modal, fmtNum, timeAgo, confirmDialog } from './dom.js';
-import { state, setSettings, isStaff, isAdmin, featureOn, THEMES, KEYBIND_ACTIONS, setSettings as saveSettings } from './store.js';
+import {
+  state, setSettings, isStaff, isAdmin, featureOn, onChange, THEMES, KEYBIND_ACTIONS,
+  setSettings as saveSettings, gameLoadout, gameMemory, gameProgress, clearGameProgress,
+} from './store.js';
 import { api } from './api.js';
 import { rt, partyOp, joinRoom, sendChat } from './realtime.js';
-import { LocalHost, OnlineHost, seatsFor, botSeat } from './host.js';
+import { LocalHost, OnlineHost, seatsFor, botSeat, clockText } from './host.js';
 import * as UI from '../games/engines/ui.js';
 
 export const views = {};
@@ -16,9 +19,13 @@ export const views = {};
  * ------------------------------------------------------------------ */
 
 export function gameCard(game, { onPlay }) {
+  // A half-played run is worth flagging on the shelf: the Play button then opens
+  // on "continue or start fresh" instead of quietly starting over.
+  const saved = gameProgress(game.engine || game.id);
   const card = el('div', { class: `game-card ${game.playable ? '' : 'planned'}` },
     el('div', { class: 'row spread' },
       el('span', { class: 'icon', text: game.icon || '🎮' }),
+      saved ? pill('▶ continue', 'good') : null,
       pill(game.playable ? `${game.players.min}${game.players.max !== game.players.min ? `-${game.players.max}` : ''} players` : 'in development', game.playable ? '' : 'warn'),
     ),
     el('strong', { text: game.name }),
@@ -38,6 +45,9 @@ export function gameCard(game, { onPlay }) {
 }
 
 export function showGameDetails(game) {
+  // Rules and option defaults live in the engine module, not in the catalog
+  // summary, so the details sheet fills them in once that file arrives.
+  const extra = el('div', { class: 'col' });
   const body = el('div', { class: 'col' },
     el('div', { class: 'muted', text: game.blurb }),
     el('div', { class: 'meta-line' }, pill(game.category), pill(`${game.players.min}-${game.players.max} players`), pill(`${game.minutes} min`), game.status !== 'playable' ? pill(game.status, 'warn') : null),
@@ -46,13 +56,28 @@ export function showGameDetails(game) {
       el('div', { class: 'option-grid' }, game.variants.map((v) => el('div', { class: 'option' }, el('strong', { text: v.name }), el('span', { class: 'option-desc', text: v.desc }))))) : null,
     (game.engineMeta?.options || []).length ? el('div', {}, el('h4', { text: 'Settings' }),
       el('div', { class: 'row' }, game.engineMeta.options.map((o) => pill(`${o.label}: ${o.default ?? 'default'}`)))) : null,
+    extra,
     el('div', { class: 'row' },
-      btn('Play solo vs bots', () => { handle.close(); startSoloGame(game); }, { variant: 'primary', disabled: !game.playable }),
+      btn('Play with people', () => { handle.close(); playWithPeople(game); }, { variant: 'primary', disabled: !game.playable }),
       btn('Local (pass device)', () => { handle.close(); startLocalGame(game); }, { disabled: !game.playable }),
-      btn('Create online room', () => { handle.close(); createRoom(game); }, { disabled: !game.playable }),
+      btn('Solo vs bots', () => { handle.close(); startSoloGame(game); }, { disabled: !game.playable }),
+      btn('Options', () => { handle.close(); showPlayOptions(game); }, { cls: 'sm', disabled: !game.playable }),
     ),
   );
   const handle = modal(game.name, body);
+  loadEngine(game.engine || game.id).then((engine) => {
+    if (!engine?.meta) return;
+    const bits = [];
+    if (engine.meta.rules?.length) {
+      bits.push(el('div', {}, el('h4', { text: 'How to play' }), el('ul', {}, engine.meta.rules.map((r) => el('li', { text: r })))));
+    }
+    const defaults = ruleSummary(engine.meta.options, {}, engine);
+    if (defaults) {
+      bits.push(el('div', {}, el('h4', { text: 'Default rules' }),
+        el('div', { class: 'row' }, pill(defaults))));
+    }
+    extra.replaceChildren(...bits);
+  });
 }
 
 /* ------------------------------------------------------------------ *
@@ -88,12 +113,12 @@ views.home = (mount) => {
 
   if (featured.length) {
     mount.appendChild(el('h3', { text: 'Featured' }));
-    mount.appendChild(el('div', { class: 'grid cards' }, featured.map((g) => gameCard(g, { onPlay: (game) => startSoloGame(game) }))));
+    mount.appendChild(el('div', { class: 'grid cards' }, featured.map((g) => gameCard(g, { onPlay: (game) => playFromCard(game) }))));
   }
 
   mount.appendChild(el('h3', { text: 'Quick plays' }));
   mount.appendChild(el('div', { class: 'grid cards' },
-    playable.filter((g) => g.minutes <= 12).slice(0, 8).map((g) => gameCard(g, { onPlay: (game) => startSoloGame(game) }))));
+    playable.filter((g) => g.minutes <= 12).slice(0, 8).map((g) => gameCard(g, { onPlay: (game) => playFromCard(game) }))));
 
   // Each card follows its own switch, so a home page never advertises a door
   // the server would refuse to open.
@@ -104,7 +129,7 @@ views.home = (mount) => {
       el('div', { class: 'row' },
         btn('Create party', () => partyOp('create'), { variant: 'primary' }),
         btn('Join by code', () => promptJoinCode()),
-        featureOn('lobby') ? btn('Open lobby', () => window.__setView('lobby')) : null,
+        featureOn('lobby') ? btn('🌐 Browse servers', () => window.__setView('lobby')) : null,
       ),
       window.__lanHint ? el('p', { class: 'mono small', text: window.__lanHint }) : null,
     ));
@@ -155,8 +180,7 @@ views.catalog = (mount) => {
       (!q || g.name.toLowerCase().includes(q) || (g.tags || []).some((t) => t.toLowerCase().includes(q))));
     list.replaceChildren(...games.map((g) => gameCard(g, {
       onPlay: (game) => {
-        if (game.modes.includes('solo') && game.players.min <= 1) return startSoloGame(game);
-        showPlayOptions(game);
+        playFromCard(game);
       },
     })));
     if (!games.length) list.appendChild(el('div', { class: 'muted', text: 'No games match that search.' }));
@@ -176,16 +200,335 @@ views.catalog = (mount) => {
   draw();
 };
 
-function showPlayOptions(game) {
+/**
+ * Games that can be played alone right now start on one click; anything that
+ * wants a table asks how you want to play first, so nobody lands on bots by
+ * accident when there are people to play with.
+ */
+function playFromCard(game) {
+  if (game.modes.includes('solo') && game.players.min <= 1) return startSoloGame(game);
+  return showPlayOptions(game);
+}
+
+/** Open rooms for one game - or, with no game, every open room there is. */
+async function fetchRooms(gameId = null) {
+  try {
+    const res = await api.get(gameId ? `/api/rooms?game=${encodeURIComponent(gameId)}` : '/api/rooms');
+    return res?.rooms || [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Is the player already in a group?  A party of one is just you, so it does
+ * not count - only a real group changes where a game should start.
+ */
+function inParty() {
+  return !!(featureOn('parties') && state.party && (state.party.members?.length || 0) > 1);
+}
+
+/**
+ * Start the game for everyone in the party.
+ *
+ * The party is the group players already picked, so the leader opening a game
+ * seats the whole group in one room instead of leaving everyone to find it.
+ * With no game chosen yet this opens the picker first: the sidebar's "Start
+ * game" used to answer "No game selected yet." with no way to select one.
+ */
+export function startPartyGame() {
+  if (!state.party) {
+    toast('Create a party first.', 'warn');
+    return;
+  }
+  if (state.party.leader !== state.me?.id) {
+    toast('Only the party leader starts the game.', 'warn');
+    return;
+  }
+  if (state.party.gameId) {
+    partyOp('start', { gameId: state.party.gameId, options: gameLoadout(state.party.gameId) });
+    return;
+  }
+  pickPartyGame();
+}
+
+/** The leader's game picker: choosing one drops the whole party into it. */
+function pickPartyGame() {
+  const list = el('div', { class: 'col', style: { maxHeight: '46vh', overflowY: 'auto' } });
+  const search = el('input', { class: 'input', placeholder: 'Search games…' });
+  const draw = () => {
+    const q = search.value.trim().toLowerCase();
+    const games = state.catalog.filter((g) => g.playable && (!q || g.name.toLowerCase().includes(q)));
+    list.replaceChildren(...games.map((g) => el('button', {
+      class: 'option',
+      onClick: () => {
+        handle.close();
+        const id = g.engine || g.id;
+        // The leader's remembered rules ride along, so the room advertises
+        // them before the rest of the party is dropped in.
+        const options = gameLoadout(id);
+        partyOp('game', { gameId: id, options });
+        partyOp('start', { gameId: id, options });
+        toast(`${g.name} - dropping the party in…`, 'good');
+      },
+    },
+    el('strong', { text: `${g.icon || '🎮'} ${g.name}` }),
+    el('span', { class: 'option-desc', text: `${g.players.min}-${g.players.max} players · ${g.minutes} min · ${g.category}` }),
+    el('span', { class: 'pill', text: 'Play →' }))));
+    if (!games.length) list.appendChild(el('div', { class: 'muted', text: 'Nothing matches that.' }));
+  };
+  search.addEventListener('input', draw);
+  const handle = modal('Party game', el('div', { class: 'col' },
+    el('p', { class: 'muted', text: 'Everyone in the party lands in the same room. Bots only fill the seats that stay empty.' }),
+    search, list));
+  draw();
+}
+
+/**
+ * One tap to a table full of people: join the fullest open room for this game,
+ * and only open a fresh one when there is nothing to join.  A room that is
+ * already open keeps its own rules - yours only ride along into a new one.
+ */
+async function quickMatch(game, options = {}) {
+  const rooms = await fetchRooms(game.engine || game.id);
+  const max = game.players?.max ?? 99;
+  const joinable = rooms
+    .filter((r) => r.status !== 'playing' && r.players.length < max)
+    .sort((a, b) => b.players.length - a.players.length);
+  state.localGame = null;
+  if (joinable.length) {
+    rt.send({ t: 'room', op: 'join', roomId: joinable[0].id });
+    window.__setView('play');
+    return;
+  }
+  await createRoom(game, options);
+}
+
+/**
+ * "Play with people" from the sheet: your party first, then any open room, and
+ * only then a room of your own.
+ */
+async function playWithPeople(game, options = {}) {
+  if (inParty()) {
+    if (state.party.leader === state.me?.id) {
+      const id = game.engine || game.id;
+      partyOp('game', { gameId: id, options });
+      partyOp('start', { gameId: id, options });
+      toast(`Party game: ${game.name}`, 'good');
+      return;
+    }
+    toast('Your party leader picks the game - you will be pulled in.', 'warn');
+    return;
+  }
+  return quickMatch(game, options);
+}
+
+/* ------------------------------ rule presets ------------------------------ */
+
+/** Human label for one option value (stage ids and 0/1 switches read badly raw). */
+function ruleValueLabel(def, value, engine) {
+  if (def?.id === 'stage') {
+    const stage = (engine?.meta?.stages || []).find((s) => s.id === value);
+    return stage?.name || String(value);
+  }
+  if (value === 0) return 'off';
+  if (value === 1 && (def?.values || []).includes(0)) return 'on';
+  return String(value).replace(/-/g, ' ');
+}
+
+/**
+ * One line describing the rules a room will play by.
+ *
+ * A room only stores what its host chose, so untouched options fall back to
+ * the engine's default: a joiner reads the rules they will actually get, not an
+ * empty list, and that is what makes a room worth joining or skipping.
+ */
+/**
+ * The rules a room plays by, as an element the room lobby can drop in.
+ *
+ * The play sheet advertises a room's rules before anyone joins; the room itself
+ * has to say the same thing once they are in it, or the promise and the match
+ * can drift apart.  Labels come from the engine module, so this fills in once
+ * that file has loaded.
+ */
+export function roomRulesLine(room) {
+  const line = el('span', { class: 'muted small', text: 'Loading rules…' });
+  loadEngine(room?.gameId).then((engine) => {
+    line.textContent = ruleSummary(engine?.meta?.options, room?.options, engine) || 'Engine default rules';
+  });
+  return line;
+}
+
+function ruleSummary(defs, options, engine) {
+  const parts = [];
+  for (const def of defs || []) {
+    const value = options?.[def.id] !== undefined ? options[def.id] : def.default;
+    if (value === undefined) continue;
+    parts.push(`${def.label} ${ruleValueLabel(def, value, engine)}`);
+  }
+  return parts.join(' · ');
+}
+
+/**
+ * What this account has already done at a game, in one line: best score, best
+ * time, runs played.  Labels come from the engine's own `meta.record`, so the
+ * line says "strokes" for mini golf and "chips" for blackjack; a game that keeps
+ * no record returns an empty string and nothing is shown.
+ */
+export function recordText(memory, meta) {
+  const spec = meta?.record;
+  if (!spec || !memory) return '';
+  const parts = [];
+  if (spec.best && memory.bestScore != null) {
+    parts.push(`best ${Math.round(Number(memory.bestScore) || 0).toLocaleString()}${spec.label ? ` ${spec.label}` : ''}`);
+  }
+  if (memory.bestTime != null) {
+    parts.push(`${spec.timeLabel || 'best time'} ${clockText(memory.bestTime)}`);
+  }
+  const played = Math.round(Number(memory.played) || 0);
+  const wins = Math.round(Number(memory.wins) || 0);
+  if (played > 0) parts.push(`${played} played${wins > 0 ? ` · ${wins} won` : ''}`);
+  return parts.join(' · ');
+}
+
+/** The saved run for a game, when the engine asked for one and there is one. */
+function resumableRun(gameId, engine) {
+  if (!engine?.meta?.record?.resume) return null;
+  return gameProgress(gameId);
+}
+
+/**
+ * Straight back into a saved run, with no questions asked - the player already
+ * said continue (from the prompt, or the continue card on an empty stage).
+ */
+export async function resumeSoloRun(game, progress) {
+  const gameId = game.engine || game.id;
+  const engine = await loadEngine(gameId);
+  if (!engine) return toast(`${game.name} is still in development.`, 'warn');
+  window.__mountGame({ mode: 'solo', game, engine, options: gameLoadout(gameId), resume: progress });
+}
+
+/**
+ * The play sheet: live rooms for this game first, then the offline ways in.
+ * The list is fetched over REST rather than the lobby socket so a player who
+ * never visited the lobby still sees who is playing right now.
+ */
+export function showPlayOptions(game) {
+  const gameId = game.engine || game.id;
+  const list = el('div', { class: 'col' });
+  const note = el('p', { class: 'muted small', text: 'Looking for open rooms…' });
+  const rulesBox = el('div', { class: 'col' });
+  // The rules picked here ride into the room you open, so the next player reads
+  // them on the room row before deciding to sit down.  Seeded from the rules
+  // this player last used; anything left alone is the engine's own default.
+  const chosen = { ...gameLoadout(gameId) };
+  let engine = null;
+  const optionDefs = () => engine?.meta?.options || [];
+
+  const joinRoomById = (room) => {
+    handle.close();
+    state.localGame = null;
+    rt.send({ t: 'room', op: 'join', roomId: room.id });
+    window.__setView('play');
+  };
+  const watchRoom = (room) => {
+    handle.close();
+    state.localGame = null;
+    rt.send({ t: 'room', op: 'spectate', roomId: room.id });
+    window.__setView('play');
+  };
+
+  const drawRooms = (rooms) => {
+    const open = rooms.filter((r) => r.status !== 'closed');
+    list.replaceChildren();
+    if (!open.length) {
+      note.textContent = 'No open rooms for this game yet - open one and it shows up here for everyone.';
+      return;
+    }
+    note.textContent = `${open.length} open room${open.length === 1 ? '' : 's'} right now`;
+    for (const room of open.slice(0, 6)) {
+      const host = room.players.find((p) => p.id === room.host)?.name || 'someone';
+      const humans = room.players.filter((p) => p.kind !== 'bot').length;
+      list.appendChild(el('div', { class: 'room-row' },
+        el('span', { text: room.game?.icon || game.icon || '🎮' }),
+        el('div', { class: 'name' },
+          el('strong', { text: room.game?.name || game.name }),
+          el('div', { class: 'muted small', text: `host ${host} · ${room.status === 'playing' ? 'in progress' : 'filling up'} · ${humans} player${humans === 1 ? '' : 's'}${room.spectators ? ` · ${room.spectators} watching` : ''}` }),
+          el('div', { class: 'muted small', text: ruleSummary(optionDefs(), room.options, engine) || 'engine default rules' }),
+        ),
+        pill(room.code),
+        room.status === 'playing'
+          ? (featureOn('spectate') ? btn('Watch', () => watchRoom(room), { cls: 'sm' }) : pill('in progress'))
+          : btn('Join', () => joinRoomById(room), { variant: 'primary', cls: 'sm' }),
+      ));
+    }
+  };
+
+  const refresh = () => fetchRooms(gameId).then(drawRooms);
+
+  /** The rule presets - one row per engine option, active value highlighted. */
+  const drawRules = () => {
+    const defs = optionDefs();
+    if (!defs.length) {
+      rulesBox.replaceChildren();
+      return;
+    }
+    rulesBox.replaceChildren(
+      el('div', { class: 'row spread' },
+        el('h4', { text: 'Rules for the room you open' }),
+        el('span', { class: 'muted small', text: ruleSummary(defs, chosen, engine) }),
+      ),
+      el('div', { class: 'col' }, defs.map((def) => {
+        // Highlight what the room will actually play with, so an untouched
+        // engine default reads the same as one the player picked on purpose.
+        const active = chosen[def.id] !== undefined ? chosen[def.id] : def.default;
+        return el('div', { class: 'row rules-row' },
+          el('span', { class: 'muted small rules-label', text: def.label }),
+          ...(def.values || []).map((value) => btn(ruleValueLabel(def, value, engine), () => {
+            chosen[def.id] = value;
+            drawRules();
+          }, { variant: active === value ? 'primary' : '', cls: 'sm' })),
+        );
+      })),
+    );
+  };
+
+  // What this account already has at this game, filled once the engine (and so
+  // the record's labels) has loaded.
+  const recordLine = el('p', { class: 'muted small record-line', text: '' });
   const body = el('div', { class: 'col' },
-    el('p', { class: 'muted', text: 'How do you want to play?' }),
+    el('p', { class: 'muted', text: 'Play with people in an open room, open one friends can join with a code - or take the bots on. Set the rules first and the room advertises them.' }),
+    recordLine,
     el('div', { class: 'option-grid' },
-      optionCard('Solo vs bots', 'You against the house AI. Jump straight in.', () => { handle.close(); startSoloGame(game); }),
+      optionCard('Play with people', 'Jump into a room that is already filling up, or open one on these rules.', () => { handle.close(); playWithPeople(game, chosen); }),
       optionCard('Local hot-seat', 'Several players sharing this device.', () => { handle.close(); startLocalGame(game); }),
-      optionCard('Online room', 'Create a room and share the code - or let a party carry you in.', () => { handle.close(); createRoom(game); }),
+      optionCard('Solo vs bots', 'You against the house AI. Jump straight in.', () => { handle.close(); startSoloGame(game); }),
+    ),
+    rulesBox,
+    el('div', { class: 'row spread' },
+      el('h4', { text: 'Open rooms' }),
+      btn('Refresh', () => refresh(), { cls: 'sm' }),
+    ),
+    note,
+    list,
+    el('div', { class: 'row' },
+      btn('Join by code', () => { handle.close(); promptJoinCode(); }, { cls: 'sm' }),
     ),
   );
-  const handle = modal(`Play ${game.name}`, body);
+  const timer = setInterval(() => { if (!note.isConnected) { clearInterval(timer); return; } refresh(); }, 5000);
+  const handle = modal(`Play ${game.name}`, body, { onClose: () => clearInterval(timer) });
+  refresh();
+  // Options live in the engine module, which the browser only loads on demand:
+  // the sheet opens instantly and fills the rule rows (and the room summaries)
+  // as soon as the family file arrives.
+  loadEngine(gameId).then((mod) => {
+    engine = mod;
+    drawRules();
+    const text = recordText(gameMemory(gameId), mod?.meta);
+    if (text) recordLine.textContent = `🏆 Your record: ${text}`;
+    else recordLine.remove();
+    refresh();
+  });
 }
 
 function optionCard(title, desc, onClick) {
@@ -203,9 +546,36 @@ export async function loadEngine(gameId) {
 }
 
 export async function startSoloGame(game) {
-  const engine = await loadEngine(game.engine || game.id);
+  const gameId = game.engine || game.id;
+  const engine = await loadEngine(gameId);
   if (!engine) return toast(`${game.name} is still in development.`, 'warn');
-  window.__mountGame({ mode: 'solo', game, engine });
+  // Open on the rules this player last played with, where the engine keeps them.
+  const options = gameLoadout(gameId);
+  // A long solo game can leave a run half-played (see meta.record.resume): offer
+  // to pick it up rather than starting over on top of it.
+  const saved = resumableRun(gameId, engine);
+  if (saved) {
+    const body = el('div', { class: 'col' },
+      el('p', { class: 'muted', text: `You have a run in progress: ${saved.label || 'where you left off'}${saved.savedAt ? ` - saved ${timeAgo(saved.savedAt)}` : ''}.` }),
+      el('div', { class: 'row' },
+        btn('Continue', () => {
+          handle.close();
+          resumeSoloRun(game, saved);
+        }, { variant: 'primary' }),
+        btn('Start fresh', () => {
+          handle.close();
+          // Mount first, then forget: a live host checkpoints the run it is
+          // playing on the way out, which would write the old run straight back
+          // over the discard.
+          window.__mountGame({ mode: 'solo', game, engine, options });
+          clearGameProgress(gameId);
+        }),
+      ),
+    );
+    const handle = modal(`Resume ${game.name}?`, body);
+    return;
+  }
+  window.__mountGame({ mode: 'solo', game, engine, options });
 }
 
 export async function startLocalGame(game) {
@@ -216,7 +586,7 @@ export async function startLocalGame(game) {
     el('div', { class: 'row' },
       ...[2, 3, 4].map((n) => btn(`${n} players`, () => {
         handle.close();
-        window.__mountGame({ mode: 'local', game, engine, humans: n });
+        window.__mountGame({ mode: 'local', game, engine, humans: n, options: gameLoadout(game.engine || game.id) });
       })),
     ),
   );
@@ -229,49 +599,186 @@ export function joinGameRoom(game) {
 
 export async function createRoom(game, options = {}) {
   state.localGame = null;
-  joinRoom({ gameId: game.engine || game.id, options, fillBots: !!options.fillBots, botLevel: 2 });
+  const id = game.engine || game.id;
+  // The lobby presets the host's remembered rules; an explicit choice wins.
+  joinRoom({ gameId: id, options: { ...gameLoadout(id), ...options }, fillBots: !!options.fillBots, botLevel: 2 });
   window.__setView('play');
 }
 
 export async function startBotRoom(game) {
   state.localGame = null;
-  joinRoom({ gameId: game.engine || game.id, fillBots: true, options: {} });
+  const id = game.engine || game.id;
+  joinRoom({ gameId: id, fillBots: true, options: gameLoadout(id) });
   window.__setView('play');
 }
 
 /* ------------------------------------------------------------------ *
- * lobby
+ * servers - every open table, across every game
  * ------------------------------------------------------------------ */
 
+/**
+ * The arcade's table list.
+ *
+ * The play sheet answers "who is playing *this* game"; this answers "who is
+ * playing anything" - every open room across every game, each with the rules
+ * it will play by, so joining a table (rather than opening one) is the normal
+ * way in.  The socket keeps it live while it is on screen (the 'lobby' handler
+ * in main.js calls the redraw hook this view installs, which is why a table
+ * appearing does not wipe the filters or a half-typed search), and a REST read
+ * fills it immediately for a player who arrives before the socket's first push.
+ */
 views.lobby = (mount) => {
-  const rooms = state.lobby || [];
-  mount.appendChild(el('div', { class: 'card' },
-    el('h1', { text: 'Lobby' }),
-    el('p', { class: 'muted', text: 'Open rooms right now. Join one, or start your own from the Games tab.' }),
-    el('div', { class: 'row' },
-      btn('Refresh', () => rt.send({ t: 'lobby' }), { cls: 'sm' }),
-      btn('Join by code', () => promptJoinCode()),
-      state.party ? btn('Start party game', () => partyOp('start'), { variant: 'primary' }) : null,
-    ),
-  ));
+  const filters = { game: '', state: '', seats: false, q: '' };
+  const rows = el('div', { class: 'col' });
+  const summary = el('p', { class: 'muted small', text: 'Looking for open tables…' });
 
-  if (!rooms.length) {
-    mount.appendChild(el('div', { class: 'card muted', text: 'No public rooms are open. Be the host - pick any game and create a room.' }));
-  }
-  for (const room of rooms) {
-    mount.appendChild(el('div', { class: 'room-row' },
-      el('span', { text: room.game?.icon || '🎮' }),
+  const maxSeats = (room) => Number(room.game?.players?.max || 0) + Number(room.game?.maxBots || 0);
+  const hasSeat = (room) => room.status !== 'playing' && room.players.length < (maxSeats(room) || Infinity);
+
+  /** The game picker only lists games that actually have a table right now. */
+  const openGames = () => {
+    const ids = [...new Set((state.lobby || []).map((r) => r.gameId))];
+    return ids
+      .map((id) => state.catalog.find((g) => (g.engine || g.id) === id) || { id, name: id })
+      .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  };
+
+  const gameSel = el('select', { class: 'input', title: 'Only tables playing this game' });
+  const stateSel = el('select', { class: 'input', title: 'Only tables in this state' },
+    el('option', { value: '', text: 'Any table' }),
+    el('option', { value: 'open', text: 'Filling up' }),
+    el('option', { value: 'playing', text: 'In progress' }));
+  const seatBox = el('input', { type: 'checkbox', id: 'servers-seats' });
+  const search = el('input', { class: 'input', placeholder: 'Host, game or code…' });
+
+  const matches = (room) => {
+    if (filters.game && room.gameId !== filters.game) return false;
+    if (filters.state === 'open' && room.status === 'playing') return false;
+    if (filters.state === 'playing' && room.status !== 'playing') return false;
+    if (filters.seats && !hasSeat(room)) return false;
+    const q = filters.q.trim().toLowerCase();
+    if (!q) return true;
+    const host = room.players.find((p) => p.id === room.host)?.name || '';
+    return `${host} ${room.game?.name || room.gameId} ${room.code}`.toLowerCase().includes(q);
+  };
+
+  /** One table: who is at it, the rules it will play by, and the way in. */
+  const tableRow = (room) => {
+    const max = maxSeats(room) || room.players.length;
+    const humans = room.players.filter((p) => p.kind !== 'bot').length;
+    const host = room.players.find((p) => p.id === room.host)?.name || 'someone';
+    const join = hasSeat(room);
+    return el('div', { class: 'room-row' },
+      el('span', { class: 'icon', text: room.game?.icon || '🎮' }),
       el('div', { class: 'name' },
         el('strong', { text: room.game?.name || room.gameId }),
-        el('div', { class: 'muted small', text: `host ${room.host} · ${room.status} · ${room.players.length} players${room.spectators ? ` · ${room.spectators} watching` : ''}` }),
+        el('div', { class: 'muted small', text: `host ${host} · ${room.status === 'playing' ? 'in progress' : 'filling up'} · ${humans} player${humans === 1 ? '' : 's'} · ${room.players.length}/${max} seats${room.spectators ? ` · ${room.spectators} watching` : ''}` }),
+        el('div', { class: 'row' }, el('span', { class: 'muted small', text: 'rules:' }), roomRulesLine(room)),
       ),
       pill(room.code),
-      room.status === 'playing'
-        ? (featureOn('spectate') ? btn('Spectate', () => { rt.send({ t: 'room', op: 'spectate', roomId: room.id }); window.__setView('play'); }, { cls: 'sm' }) : pill('spectating off'))
-        : btn('Join', () => { state.localGame = null; rt.send({ t: 'room', op: 'join', roomId: room.id }); window.__setView('play'); }, { variant: 'primary', cls: 'sm' }),
-    ));
-  }
+      room.autoStartAt > Date.now() ? pill('starting soon', 'good') : null,
+      join
+        ? btn('Join', () => openTable(room), { variant: 'primary', cls: 'sm' })
+        : room.status === 'playing'
+          ? (featureOn('spectate') ? btn('Watch', () => openTable(room, true), { cls: 'sm' }) : pill('in progress'))
+          : pill('full'),
+    );
+  };
+
+  const draw = () => {
+    // Called again after the view is gone (a lobby push racing a view switch):
+    // a detached list must not try to redraw itself.
+    if (!rows.isConnected) {
+      if (window.__redrawServers === draw) window.__redrawServers = null;
+      return;
+    }
+    const games = openGames();
+    if (filters.game && !games.some((g) => g.id === filters.game)) filters.game = '';
+    gameSel.replaceChildren(
+      el('option', { value: '', text: 'All games' }),
+      ...games.map((g) => el('option', { value: g.id, text: `${g.icon || '🎮'} ${g.name}` })));
+    gameSel.value = filters.game;
+
+    const all = state.lobby || [];
+    const list = all.filter(matches).sort((a, b) =>
+      (hasSeat(b) ? 1 : 0) - (hasSeat(a) ? 1 : 0)
+      || b.players.length - a.players.length
+      || (b.updatedAt || 0) - (a.updatedAt || 0));
+    const seats = all.filter(hasSeat).length;
+    const seated = all.reduce((n, r) => n + r.players.length, 0);
+    summary.textContent = !all.length
+      ? 'No public tables are open right now.'
+      : list.length === all.length
+        ? `${all.length} open table${all.length === 1 ? '' : 's'} · ${seats} with a free seat · ${seated} seated`
+        : `${list.length} of ${all.length} tables shown · ${seats} with a free seat · ${seated} seated`;
+
+    if (!all.length) {
+      rows.replaceChildren(el('div', { class: 'card muted' },
+        el('p', { text: 'Nobody has a table open. Be the host - pick a game and open one, and it shows up here for everyone.' }),
+        el('div', { class: 'row' },
+          btn('Browse games', () => window.__setView('catalog'), { variant: 'primary' }),
+          btn('Join by code', () => promptJoinCode(), { cls: 'sm' }))));
+      return;
+    }
+    rows.replaceChildren(...list.map(tableRow));
+    if (!list.length) rows.appendChild(el('div', { class: 'card muted', text: 'No table matches those filters.' }));
+  };
+
+  /** Join (or watch) the fullest table the filters allow. */
+  const quickJoin = () => {
+    const list = (state.lobby || []).filter(matches).filter(hasSeat)
+      .sort((a, b) => b.players.length - a.players.length || (b.updatedAt || 0) - (a.updatedAt || 0));
+    if (!list.length) {
+      toast('No open table has a free seat - open one, or join by code.', 'warn');
+      return;
+    }
+    toast(`Sitting down at ${list[0].game?.name || list[0].gameId} · ${list[0].code}`, 'good');
+    openTable(list[0]);
+  };
+
+  /** Subscribe to the live list and read the current one over REST. */
+  const refresh = () => {
+    rt.send({ t: 'lobby' });
+    fetchRooms().then((list) => {
+      if (list.length || !(state.lobby || []).length) state.lobby = list;
+      draw();
+    });
+  };
+
+  gameSel.addEventListener('change', () => { filters.game = gameSel.value; draw(); });
+  stateSel.addEventListener('change', () => { filters.state = stateSel.value; draw(); });
+  seatBox.addEventListener('change', () => { filters.seats = seatBox.checked; draw(); });
+  search.addEventListener('input', () => { filters.q = search.value; draw(); });
+
+  mount.appendChild(el('div', { class: 'card' },
+    el('h1', { text: 'Servers' }),
+    el('p', { class: 'muted', text: 'Every open table across every game, with the rules it will play by. A table that fills up starts on its own.' }),
+    el('div', { class: 'row' },
+      btn('⚡ Quick join', quickJoin, { variant: 'primary' }),
+      btn('Refresh', () => refresh(), { cls: 'sm' }),
+      btn('Join by code', () => promptJoinCode(), { cls: 'sm' }),
+      inParty() ? btn('Start party game', () => startPartyGame(), { cls: 'sm' }) : null,
+    ),
+    el('div', { class: 'row filter-bar' },
+      el('span', { class: 'muted small', text: 'Filter' }),
+      gameSel,
+      stateSel,
+      el('label', { class: 'keep-picker', for: 'servers-seats' }, seatBox, el('span', { text: 'Free seat only' })),
+      search),
+    summary,
+    rows,
+  ));
+  window.__redrawServers = draw;
+  draw();
+  refresh();
 };
+
+/** Sit at a table - or watch one that is already playing - from anywhere. */
+function openTable(room, spectate = false) {
+  state.localGame = null;
+  rt.send({ t: 'room', op: spectate ? 'spectate' : 'join', roomId: room.id });
+  window.__setView('play');
+}
 
 export function promptJoinCode() {
   const input = el('input', { class: 'input', placeholder: 'Room or party code', maxlength: 12 });
@@ -336,12 +843,42 @@ views.friends = (mount) => {
   }
   mount.appendChild(el('h3', { text: `All friends (${accepted.length})` }));
   if (!accepted.length) mount.appendChild(el('div', { class: 'card muted', text: 'No friends yet - add someone by username above.' }));
-  mount.appendChild(el('div', { class: 'col' }, accepted.map((f) => friendRow(f, [
+  const live = el('div', { class: 'col' }, accepted.map((f) => friendRow(f, [
     featureOn('dm') ? btn('DM', () => { window.__openDm(f.id); }, { cls: 'sm' }) : null,
-    featureOn('parties') ? btn('Invite', () => { partyOp('invite', { userId: f.id }); toast(`Invited ${f.name}`, 'good'); }, { cls: 'sm' }) : null,
+    featureOn('parties') ? btn('Invite', () => inviteToParty(f), { cls: 'sm' }) : null,
     btn('Remove', () => confirmDialog('Remove friend', `Remove ${f.name} from your friends?`, () => rt.send({ t: 'friend', op: 'remove', userId: f.id })), { cls: 'sm' }),
-  ]))));
+  ])));
+  mount.appendChild(live);
+
+  // An accepted request or a presence flip has to appear on this screen by
+  // itself - the sidebar already updates, so a stale Friends tab just looks
+  // broken.  The redraw only fires when the ids/statuses really changed, so
+  // typing a username into the box is not interrupted by idle traffic.
+  const signature = () => state.friends.map((f) => `${f.id}:${f.friendStatus}:${f.presence}`).join('|');
+  let seen = signature();
+  const stop = onChange(() => {
+    if (!live.isConnected) {
+      stop();
+      return;
+    }
+    const next = signature();
+    if (next === seen) return;
+    seen = next;
+    window.__render();
+  });
 };
+
+/**
+ * Most parties start with an invite, so an invite with no party opens one on
+ * the spot: the socket applies both ops in order, and the alternative - a
+ * cheerful "Invited pixelpal" followed by "You are not in a party." - is a
+ * dead end for the one flow this button exists for.
+ */
+export function inviteToParty(friend) {
+  if (!state.party) partyOp('create');
+  partyOp('invite', { userId: friend.id });
+  toast(`Invited ${friend.name} to your party`, 'good');
+}
 
 function friendRow(f, actions) {
   return el('div', { class: 'friend-row' },

@@ -4,6 +4,7 @@
  */
 import * as U from './util.js';
 import * as UI from './ui.js';
+import * as Art from './art.js';
 
 const MODES = ['solo', 'local', 'online'];
 const COLORS = ['red', 'yellow', 'green', 'blue'];
@@ -48,6 +49,8 @@ function canPlay(card, top, currentColor) {
 export const uno = {
   meta: {
     id: 'uno',
+    // A round won is a point banked.
+    record: { best: 'high', label: 'rounds won' },
     name: 'UNO',
     category: 'cards',
     players: { min: 2, max: 10 },
@@ -233,34 +236,37 @@ export const uno = {
     const ui = host?.uiState || (host ? (host.uiState = {}) : {});
     const myTurn = view.turn.includes(playerId);
     el.appendChild(UI.turnBanner(view));
-    el.appendChild(UI.h('div', { class: 'uno-table' },
-      UI.h('div', { class: 'uno-pile' },
-        UI.h('div', { class: `uno-card back`, text: view.deckCount }),
-        UI.h('div', {
-          class: `uno-card big ${view.top.color === 'wild' ? 'wild' : view.top.color}`,
-          style: ui.pendingColor && view.top.color === 'wild' ? { background: COLOR_HEX[view.currentColor] } : null,
-          text: unoValueOf(view.top),
-        }),
+    // The table and the hand are one scene, so they share one felt stage: the
+    // pile in the middle of it and your cards laid out on the same cloth.
+    el.appendChild(Art.boardStage('uno', { width: 940, height: 560 },
+      UI.h('div', { class: 'uno-table' },
+        UI.h('div', { class: 'uno-pile' },
+          UI.h('div', { class: `uno-card back`, text: view.deckCount }),
+          UI.h('div', {
+            class: `uno-card big ${view.top.color === 'wild' ? 'wild' : view.top.color}`,
+            style: ui.pendingColor && view.top.color === 'wild' ? { background: COLOR_HEX[view.currentColor] } : null,
+            text: unoValueOf(view.top),
+          }),
+        ),
+        UI.h('div', { class: 'uno-meta' },
+          UI.pill(`Colour: ${view.currentColor}`, view.currentColor),
+          UI.pill(view.direction === 1 ? 'Clockwise' : 'Counter-clockwise'),
+          view.pendingDraw ? UI.pill(`+${view.pendingDraw} pending`, 'warn') : null,
+        ),
       ),
-      UI.h('div', { class: 'uno-meta' },
-        UI.pill(`Colour: ${view.currentColor}`, view.currentColor),
-        UI.pill(view.direction === 1 ? 'Clockwise' : 'Counter-clockwise'),
-        view.pendingDraw ? UI.pill(`+${view.pendingDraw} pending`, 'warn') : null,
-      ),
-    ));
-    el.appendChild(UI.h('div', { class: 'uno-hand' },
-      view.hand.map((card) =>
-        UI.h('button', {
-          class: `uno-card ${card.color === 'wild' ? 'wild' : card.color} ${view.playable.includes(card.id) ? 'playable' : ''}`,
-          disabled: !myTurn,
-          onClick: () => {
-            if (card.color === 'wild') {
-              ui.picking = card.id;
-              host?.refresh?.();
-            } else send({ type: 'play', card: card.id });
-          },
-        }, unoValueOf(card)),
-      )));
+      UI.h('div', { class: 'uno-hand' },
+        view.hand.map((card) =>
+          UI.h('button', {
+            class: `uno-card ${card.color === 'wild' ? 'wild' : card.color} ${view.playable.includes(card.id) ? 'playable' : ''}`,
+            disabled: !myTurn,
+            onClick: () => {
+              if (card.color === 'wild') {
+                ui.picking = card.id;
+                host?.refresh?.();
+              } else send({ type: 'play', card: card.id });
+            },
+          }, unoValueOf(card)),
+        ))));
     if (ui.picking) {
       el.appendChild(UI.h('div', { class: 'colour-picker' },
         UI.muted('Pick a colour:'),
@@ -323,6 +329,8 @@ const DRAWN_RANKS = ['Blob', 'Wobble', 'Sprout', 'Cactus', 'Crown', 'Ghostie', '
 export const goFish = {
   meta: {
     id: 'go-fish',
+    // Books collected across the match.
+    record: { best: 'high', label: 'books' },
     name: 'Go Fish',
     category: 'cards',
     players: { min: 2, max: 8 },
@@ -488,20 +496,21 @@ export const goFish = {
     const ui = host?.uiState || (host ? (host.uiState = {}) : {});
     const myTurn = view.turn.includes(playerId);
     el.appendChild(UI.turnBanner(view));
-    el.appendChild(UI.h('div', { class: 'fish-row' },
-      UI.panel('Your hand', UI.h('div', { class: 'fish-hand' },
-        Object.entries(view.hand).map(([rank, n]) =>
-          UI.h('button', {
-            class: `fish-card ${ui.pickRank === rank ? 'on' : ''}`,
-            disabled: !myTurn,
-            onClick: () => {
-              ui.pickRank = rank;
-              host?.refresh?.();
-            },
-          }, UI.h('strong', { text: rank }), UI.h('span', { class: 'count', text: `×${n}` }))),
-      )),
-      UI.panel('Pond', UI.h('div', { class: 'pond' }, UI.h('div', { class: 'fish-card back', text: `${view.pondCount}` }))),
-    ));
+    el.appendChild(Art.boardStage('go-fish', { width: 900, height: 460 },
+      UI.h('div', { class: 'fish-row' },
+        UI.panel('Your hand', UI.h('div', { class: 'fish-hand' },
+          Object.entries(view.hand).map(([rank, n]) =>
+            UI.h('button', {
+              class: `fish-card ${ui.pickRank === rank ? 'on' : ''}`,
+              disabled: !myTurn,
+              onClick: () => {
+                ui.pickRank = rank;
+                host?.refresh?.();
+              },
+            }, UI.h('strong', { text: rank }), UI.h('span', { class: 'count', text: `×${n}` }))),
+        )),
+        UI.panel('Pond', UI.h('div', { class: 'pond' }, UI.h('div', { class: 'fish-card back', text: `${view.pondCount}` }))),
+      )));
     const others = view.players.filter((p) => p.id !== playerId);
     el.appendChild(UI.h('div', { class: 'ask-targets' },
       UI.muted('Ask:'),
@@ -582,6 +591,8 @@ function checkFishEnd(state, events) {
 export const blackjack = {
   meta: {
     id: 'blackjack',
+    // The bankroll you closed the table with.
+    record: { best: 'high', label: 'chips' },
     name: '21 / Blackjack',
     category: 'cards',
     players: { min: 1, max: 7 },
@@ -708,10 +719,11 @@ export const blackjack = {
   },
   render({ el, view, playerId, send }) {
     el.appendChild(UI.turnBanner(view, { label: view.dealerRevealed ? `Dealer ${view.dealerTotal}` : `Round ${view.round}/${view.rounds} - dealer shows ${cardLabel(view.dealer[1])}` }));
-    el.appendChild(UI.h('div', { class: 'table-row' },
-      UI.panel('Dealer', UI.h('div', { class: 'hand' }, view.dealer.map((c) => cardEl(c, true)))),
-      UI.panel('You', UI.h('div', { class: 'hand' }, view.hand.map((c) => cardEl(c, false))), UI.h('div', { class: 'hand-total' }, `Total: ${view.total}${view.status[playerId]?.result ? ` (${view.status[playerId].result})` : ''}`)),
-    ));
+    el.appendChild(Art.boardStage('blackjack', { width: 900, height: 420 },
+      UI.h('div', { class: 'table-row' },
+        UI.panel('Dealer', UI.h('div', { class: 'hand' }, view.dealer.map((c) => cardEl(c, true)))),
+        UI.panel('You', UI.h('div', { class: 'hand' }, view.hand.map((c) => cardEl(c, false))), UI.h('div', { class: 'hand-total' }, `Total: ${view.total}${view.status[playerId]?.result ? ` (${view.status[playerId].result})` : ''}`)),
+      )));
     if (view.turn.includes(playerId)) {
       el.appendChild(UI.row(
         UI.btn('Hit', () => send({ type: 'hit' }), { variant: 'primary' }),
@@ -737,11 +749,20 @@ function cardLabel(card) {
   return card?.hidden ? '??' : card ? `${card.value}${card.suit}` : '';
 }
 
+/**
+ * One playing card: the index at the left, the suit big beside it.
+ *
+ * The face used to be the string "7♦" in a white box; a card you can read at
+ * arm's length from the suit shape is the whole point of a card face, so the
+ * two parts are separate elements now (and the stylesheet gives them depth).
+ */
 function cardEl(card, hiddenSheet) {
   if (!card) return UI.h('span', { class: 'pcard empty' });
   if (card.hidden) return UI.h('span', { class: 'pcard back', text: '?' });
   const red = card.suit === '♥' || card.suit === '♦';
-  return UI.h('span', { class: `pcard ${red ? 'red' : 'black'}`, text: `${card.value}${card.suit}` });
+  return UI.h('span', { class: `pcard ${red ? 'red' : 'black'}` },
+    UI.h('b', { class: 'pcard-index', text: card.value }),
+    UI.h('i', { class: 'pcard-suit', text: card.suit }));
 }
 
 function makeShoe(decks, rng) {

@@ -11,6 +11,7 @@
  */
 import * as U from './util.js';
 import * as UI from './ui.js';
+import * as Art from './art.js';
 
 const FILES = 'abcdefgh';
 const PIECES = { k: '♚', q: '♛', r: '♜', b: '♝', n: '♞', p: '♟' };
@@ -419,6 +420,24 @@ function insufficientMaterial(state) {
   return minors <= 1;
 }
 
+/**
+ * How a finished game ended, as a stable code the record-keeping can group by.
+ *
+ * A resignation also ends with a `winnerId`, so the summary is read first: it is
+ * the engine's own sentence and the only place a resignation and a checkmate
+ * differ.
+ */
+function endReason(state) {
+  const summary = String(state.summary || '');
+  if (/resign/i.test(summary)) return 'resignation';
+  if (state.winnerId) return 'checkmate';
+  if (/50-move|fifty/i.test(summary)) return 'fifty-move';
+  if (/insufficient/i.test(summary)) return 'insufficient-material';
+  if (/threefold|repetition/i.test(summary)) return 'repetition';
+  if (state.draw) return 'stalemate';
+  return 'unknown';
+}
+
 export const chess = {
   meta: {
     id: 'chess',
@@ -441,6 +460,26 @@ export const chess = {
       { id: 'botDepth', label: 'Bot thinking', type: 'select', values: [1, 2, 3], default: 2 },
       { id: 'time', label: 'Clock', type: 'select', values: [0, 300, 600], default: 0 },
     ],
+    /**
+     * What a finished match leaves behind for review - the server records this
+     * with the result (see finish() in server/games.js), and the admin console's
+     * chess analysis groups by it: how the game ended, which seat played which
+     * colour, how long the game ran and how it opened.  Small on purpose: it
+     * travels into the database and is never replayed, only counted.
+     */
+    review(state) {
+      const moveList = state.moveList || [];
+      const seatOf = (side) => state.players.find((p) => state.sides[p.id] === side)?.id || null;
+      return {
+        end: endReason(state),
+        white: seatOf('w'),
+        black: seatOf('b'),
+        plies: moveList.length,
+        captures: { w: (state.captured?.w || []).length, b: (state.captured?.b || []).length },
+        opening: moveList.slice(0, 6),
+        lastMove: moveList[moveList.length - 1] || null,
+      };
+    },
   },
   create({ players, seed, options = {} }) {
     const state = U.baseState({ players, seed });
@@ -536,13 +575,20 @@ export const chess = {
     const promote = ui.promote;
     el.appendChild(UI.turnBanner(view, { label: view.inCheck && view.turn.length ? 'CHECK!' : null }));
     el.appendChild(UI.h('div', { class: 'chess-wrap' },
-      UI.gridBoard(8, 8, (bx, by) => {
+      Art.boardStage('chess', { width: 760, height: 760 },
+        UI.gridBoard(8, 8, (bx, by) => {
         const x = flipped ? 7 - bx : bx;
         const y = flipped ? 7 - by : by;
         const i = idx(x, y);
         const piece = view.board[i];
         const dark = (x + y) % 2 === 1;
-        const isTarget = !!legal[i];
+        // `legal` is keyed by destination for every piece of the viewer's colour,
+        // so a square is only a target for the piece actually selected.  Lighting
+        // up the whole colour's move set let a rook click on a bishop's square
+        // send a move the engine then refused ("Illegal move.").
+        const selected = ui.selected ?? null;
+        const movesHere = selected === null ? [] : (legal[i] || []).filter((m) => m.from === selected);
+        const isTarget = movesHere.length > 0;
         const isSelected = ui.selected === i;
         const isLast = view.lastMove && (view.lastMove.from === i || view.lastMove.to === i);
         const isCheck = view.checkSquare === i;
@@ -550,14 +596,13 @@ export const chess = {
           piece ? UI.h('span', { class: `cp ${colorOf(piece) === 'w' ? 'white' : 'black'}`, text: PIECES[typeOf(piece)] }) : '',
           () => {
             if (!myTurn) return;
-            if (isTarget && ui.selected !== undefined && ui.selected !== null) {
-              const options = legal[i] || [];
-              if (options.some((m) => m.promo)) {
-                ui.promote = { from: ui.selected, to: i };
+            if (isTarget) {
+              if (movesHere.some((m) => m.promo)) {
+                ui.promote = { from: selected, to: i };
                 host?.refresh?.();
                 return;
               }
-              send({ type: 'move', from: ui.selected, to: i });
+              send({ type: 'move', from: selected, to: i });
               ui.selected = null;
               host?.refresh?.();
               return;
@@ -570,9 +615,12 @@ export const chess = {
               host?.refresh?.();
             }
           },
-          { className: `${dark ? 'dark-square' : 'light-square'} ${isTarget ? 'target' : ''} ${isSelected ? 'selected' : ''} ${isLast ? 'last' : ''} ${isCheck ? 'in-check' : ''}` },
+          // `occupied` lets the stylesheet draw a capture ring on a target
+          // square with a piece on it and a plain move dot on an empty one -
+          // the difference a player is looking for at a glance.
+          { className: `${dark ? 'dark-square' : 'light-square'} ${piece ? 'occupied' : ''} ${isTarget ? 'target' : ''} ${isSelected ? 'selected' : ''} ${isLast ? 'last' : ''} ${isCheck ? 'in-check' : ''}` },
         );
-      }, { className: 'chess' }),
+      }, { className: 'chess' })),
       UI.h('div', { class: 'chess-side' },
         UI.h('div', { class: 'captured' }, (view.captured[mySide === 'w' ? 'b' : 'w'] || []).map((p) => PIECES[typeOf(p)]).join(' ')),
         UI.h('ol', { class: 'movelist' }, view.moveList.map((m) => UI.h('li', { text: m }))),

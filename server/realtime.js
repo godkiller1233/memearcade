@@ -583,7 +583,7 @@ export class RealtimeHub {
   handleSettings(session, msg) {
     this.requireAuth(session);
     const patch = msg.patch || msg.settings || {};
-    const allowed = ['theme', 'accent', 'font', 'reduceMotion', 'cardSize', 'audio', 'keybinds', 'notifications', 'privacy', 'gameplay'];
+    const allowed = ['theme', 'accent', 'font', 'reduceMotion', 'cardSize', 'audio', 'keybinds', 'notifications', 'privacy', 'gameplay', 'games'];
     const clean = {};
     for (const key of allowed) if (patch[key] !== undefined) clean[key] = patch[key];
     const settings = updateSettings(session.user, clean);
@@ -927,6 +927,43 @@ export class RealtimeHub {
         this.rooms.removePlayer(current, String(msg.userId), { reason: 'was removed by the host' });
         return;
       }
+      case 'invite': {
+        // Anyone in the room can ask a friend to join: the invite IS how a
+        // private room's code reaches someone, and a waiting room with an
+        // empty seat is exactly who needs this button.  The target gets a
+        // notification that joins in one tap (see the client's notify action).
+        if (!current) throw new Error('You are not in a room.');
+        const target = msg.userId ? getUser(msg.userId) : msg.name ? getUserByName(msg.name) : null;
+        if (!target) throw new Error('User not found.');
+        if (target.id === me.id) throw new Error("That's you - share the code with a friend instead.");
+        this.rateCheck(session, 'room-invite', 8);
+        this.notify(target.id, 'room-invite', `${me.name} invited you to ${current.engine.meta.name}.`, {
+          roomId: current.id,
+          code: current.code,
+          gameId: current.gameId,
+          game: current.engine.meta.name,
+          from: userPublic(me),
+        });
+        return { ok: true };
+      }
+      case 'visibility': {
+        // The host's tab hid or came back.  The world keeps streaming at the
+        // cadence the browser still allows, but the room should know why frames
+        // got choppier - and everyone sees normal service resume the moment the
+        // host is back.  Only the host's own tab decides this for the room.
+        if (!current || !current.engine.meta.realtime || current.host !== me.id) return { ok: true };
+        this.rateCheck(session, 'room-visibility', 8);
+        if (!this.rooms.noteHostVisibility(current, msg.hidden)) return { ok: true };
+        if (msg.hidden) {
+          this.rooms.systemMessage(current, `⏳ ${me.name} is hosting from a background tab — frames may be choppier until it is back.`);
+        } else if (!current.streamWarned) {
+          // A stream that stalled while hidden stays flagged: the roster banner
+          // keeps naming the stall until a snapshot lands (see handleTick).
+          this.rooms.systemMessage(current, `▶️ ${me.name} is back in the foreground.`);
+        }
+        this.rooms.broadcast(current);
+        return { ok: true };
+      }
       case 'rematch': {
         if (!current) throw new Error('You are not in a room.');
         if (current.host !== me.id) throw new Error('Only the host can restart.');
@@ -988,6 +1025,9 @@ export class RealtimeHub {
     room.state = msg.snapshot;
     room.updatedAt = now();
     room.lastActivity = now();
+    // The out-of-band stream path (see also the snapshot branch of rooms.act):
+    // a snapshot here is the room's heartbeat and clears any stall warning.
+    this.rooms.noteHostSnapshot(room);
     // rebroadcast to everyone but the host (who already has this state)
     const recipients = [
       ...room.players.filter((p) => p.kind === 'human' && p.id !== session.user.id).map((p) => p.id),

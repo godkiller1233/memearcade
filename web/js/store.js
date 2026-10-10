@@ -80,6 +80,9 @@ export const state = {
     notifications: { friendRequests: true, partyInvites: true, sounds: true, mentions: true },
     privacy: { showInLobby: true, allowInvites: true, allowDms: 'friends', presence: 'online' },
     gameplay: { confirmMoves: false, autoReady: false, timers: true, largeText: false, colorblindSafe: false, lowSpec: false },
+    // Per-game memory: game id -> whatever that game wants to remember between
+    // matches (see gameMemory/rememberGame below).
+    games: {},
   },
   ui: { busy: false },
 };
@@ -140,6 +143,71 @@ export function setSettings(patch, { persist = true } = {}) {
   if (persist) mirrorSettings();
   notify();
   return state.settings;
+}
+
+/**
+ * Per-game memory.
+ *
+ * A game that should never forget something - a loadout, a record, a high
+ * score - reads and writes one small object under `settings.games[gameId]`.
+ * It rides the settings pipeline the arcade already has: instant from
+ * localStorage on boot, mirrored to the account so the website, the desktop
+ * client and the bot agree, and device-only for a guest (mirrorSettings skips a
+ * signed-out client).
+ */
+export function gameMemory(gameId) {
+  const all = state.settings?.games;
+  const memory = all && typeof all === 'object' ? all[String(gameId)] : null;
+  return memory && typeof memory === 'object' ? memory : null;
+}
+
+/** Store a game's memory, persisting it and syncing it to the account. */
+export function rememberGame(gameId, memory) {
+  if (!memory || typeof memory !== 'object') return null;
+  setSettings({ games: { [String(gameId)]: memory } });
+  return memory;
+}
+
+/**
+ * The unfinished solo run saved for a game, or null when there is none.
+ *
+ * A long solo game (a nine-hole round, a sudoku grid) parks its state here while
+ * it is being played, so leaving the page - or quitting the app - does not throw
+ * the run away.  The state travels as a string: the settings merge replaces a
+ * primitive outright, which is the only way a saved run can also be *cleared*
+ * (see clearGameProgress and the tombstone bookRun writes when a run finishes).
+ */
+export function gameProgress(gameId) {
+  const progress = gameMemory(gameId)?.progress;
+  const json = typeof progress?.json === 'string' ? progress.json : '';
+  if (!json) return null;
+  try {
+    const state = JSON.parse(json);
+    if (!state || typeof state !== 'object') return null;
+    return { ...progress, state };
+  } catch {
+    return null;
+  }
+}
+
+/** Retire a game's saved run (the record itself is untouched). */
+export function clearGameProgress(gameId) {
+  const memory = gameMemory(gameId);
+  if (!memory?.progress) return null;
+  return rememberGame(gameId, { ...memory, progress: { json: '', runId: memory.progress.runId || null, doneAt: Date.now() } });
+}
+
+/**
+ * The remembered table rules for a game, in the shape engines take as
+ * `options` - so a game the player already set up opens on their rules instead
+ * of the stock defaults.
+ */
+export function gameLoadout(gameId) {
+  const memory = gameMemory(gameId);
+  if (!memory) return {};
+  const out = {};
+  for (const key of ['pick', 'stage', 'stocks', 'time']) if (memory[key] !== undefined) out[key] = memory[key];
+  return out;
 }
 
 let settingsTimer = null;

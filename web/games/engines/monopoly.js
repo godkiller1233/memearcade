@@ -9,8 +9,19 @@
  */
 import * as U from './util.js';
 import * as UI from './ui.js';
+import * as Art from './art.js';
 
 const MODES = ['local', 'online'];
+
+/** Where a die's pips sit in its 3x3 face, so 1..6 read without a font. */
+const PIPS = {
+  1: [4],
+  2: [0, 8],
+  3: [0, 4, 8],
+  4: [0, 2, 6, 8],
+  5: [0, 2, 4, 6, 8],
+  6: [0, 2, 3, 5, 6, 8],
+};
 
 const GROUPS = {
   treat: { name: 'Sweet street', color: '#f472b6' },
@@ -327,7 +338,9 @@ export const monopoly = {
       UI.pill(`Round ${view.round}${view.maxRounds ? `/${view.maxRounds}` : ''}`),
       UI.pill(`💰 ${view.cash[playerId] ?? 0}`),
       UI.pill(`Free Parking pot: ${view.pot}`)));
-    if (view.dice) el.appendChild(UI.row(UI.pill(`🎲 ${view.dice.a}`), UI.pill(`🎲 ${view.dice.b}`)));
+    // The dice ride on the board's own stage (below), so the roll is part of
+    // the table rather than another row of chrome under it.
+    const dice = view.dice ? UI.h('div', { class: 'dice' }, die(view.dice.a), die(view.dice.b)) : null;
     if (view.lastCard) el.appendChild(UI.h('div', { class: 'prompt-card' }, UI.h('div', { class: 'prompt-text', text: view.lastCard })));
     const cells = view.tiles.map((tile) => {
       const owners = view.players.filter((p) => view.pos[p.id] === tile.index && !view.out[p.id]);
@@ -344,7 +357,9 @@ export const monopoly = {
         ownerSeat ? UI.h('span', { class: 'tile-owner', text: `${ownerSeat.avatar || ''} ${ownerSeat.name}` }) : null,
         owners.length ? UI.h('span', { class: 'tokens', text: owners.map((p) => p.avatar || '👾').join('') }) : null);
     });
-    el.appendChild(UI.h('div', { class: 'board monopoly', style: { '--cols': 6, '--rows': 4 } }, cells));
+    el.appendChild(Art.boardStage('monopoly', { width: 1000, height: 680 },
+      dice,
+      UI.h('div', { class: 'board monopoly', style: { '--cols': 6, '--rows': 4 } }, cells)));
     if (view.phase === 'buy' && view.pendingBuy) {
       const tile = view.tiles[view.pendingBuy.index];
       el.appendChild(UI.row(
@@ -366,6 +381,19 @@ export const monopoly = {
     el.appendChild(UI.logView(view, { limit: 6 }));
   },
 };
+
+/**
+ * One die face: nine pip slots with this face's own sitting lit.
+ *
+ * Dice were two emoji pills, which told you the number and nothing else - a
+ * rolled pair is the thing every eye on a Monopoly table is following, so it
+ * gets the same treatment the canvas games give a ball or a paddle.
+ */
+function die(n) {
+  const on = new Set(PIPS[n] || []);
+  return UI.h('span', { class: `die face-${n}`, title: String(n) },
+    Array.from({ length: 9 }, (_, i) => UI.h('i', { class: `pip ${on.has(i) ? 'on' : ''}` })));
+}
 
 function landOn(state, playerId, pos, total, events, doubles) {
   const tile = TILES[pos];

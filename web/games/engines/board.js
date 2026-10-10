@@ -12,6 +12,7 @@
  */
 import * as U from './util.js';
 import * as UI from './ui.js';
+import * as Art from './art.js';
 
 const MODES = ['solo', 'local', 'online'];
 
@@ -171,15 +172,19 @@ export const ticTacToe = {
     el.appendChild(UI.turnBanner(view, { label: view.winLine ? view.summary || 'Round over' : null }));
     if (view.bestOf > 1) el.appendChild(UI.row(...view.players.map((p) => UI.pill(`${p.name}: ${view.roundWins?.[p.id] || 0}`))));
     el.appendChild(
-      UI.gridBoard(3, 3, (x, y) => {
-        const i = y * 3 + x;
-        const mark = view.board[i];
-        const inLine = view.winLine?.includes(i);
-        return UI.gridButton(mark || '', () => send({ type: 'place', i }), {
-          className: `${mark ? 'filled' : ''} ${inLine ? 'win' : ''}`,
-          disabled: interactive || !!mark,
-        });
-      }, { className: 'ttt' }),
+      Art.boardStage('tic-tac-toe', { width: 620, height: 620 },
+        UI.gridBoard(3, 3, (x, y) => {
+          const i = y * 3 + x;
+          const mark = view.board[i];
+          const inLine = view.winLine?.includes(i);
+          // X and O take opposite ends of the palette, the way the canvas
+          // sprites are lit: one warm, one cold, so the board reads at a
+          // glance whose square is whose.
+          return UI.gridButton(mark || '', () => send({ type: 'place', i }), {
+            className: `${mark ? `filled mark-${mark === 'X' ? 'x' : 'o'}` : ''} ${inLine ? 'win' : ''}`,
+            disabled: interactive || !!mark,
+          });
+        }, { className: 'ttt' })),
     );
   },
 };
@@ -319,7 +324,8 @@ export const ultimateTtt = {
   render({ el, view, playerId, send }) {
     el.appendChild(UI.turnBanner(view));
     el.appendChild(
-      UI.h('div', { class: 'macro-grid' },
+      Art.boardStage('ultimate-ttt', { width: 720, height: 720 },
+        UI.h('div', { class: 'macro-grid' },
         view.boards.map((board, b) => {
           const claimed = view.macro[b];
           const forced = view.active === null || view.active === b;
@@ -327,12 +333,12 @@ export const ultimateTtt = {
             const c = y * 3 + x;
             const mark = board[c];
             return UI.gridButton(mark || '', () => send({ type: 'play', board: b, cell: c }), {
-              className: `${mark ? 'filled' : ''} ${view.macroLines?.includes(b) ? 'win' : ''}`,
+              className: `${mark ? `filled mark-${mark === 'X' ? 'x' : 'o'}` : ''} ${view.macroLines?.includes(b) ? 'win' : ''}`,
               disabled: !forced || !!mark || !!claimed || !view.turn.includes(playerId),
             });
           }, { className: `mini ${forced ? 'allowed' : 'blocked'} ${claimed ? 'claimed' : ''}` });
           return UI.h('div', { class: 'mini-wrap' }, box, claimed ? UI.h('span', { class: 'stamp', text: claimed === 'D' ? '=' : claimed }) : null);
-        })),
+        }))),
     );
   },
 };
@@ -432,14 +438,15 @@ export const connectFour = {
     el.appendChild(UI.turnBanner(view));
     const canPlay = view.turn.includes(playerId);
     el.appendChild(
-      UI.gridBoard(view.w, view.h, (x, y) => {
-        const disc = view.grid[y][x];
-        const isWin = view.winCells?.some(([wy, wx]) => wy === y && wx === x);
-        return UI.gridButton('', () => send({ type: 'drop', col: x }), {
-          className: `disc ${disc || ''} ${isWin ? 'win' : ''}`,
-          disabled: !canPlay || !!view.grid[0][x],
-        });
-      }, { className: 'connect4' }),
+      Art.boardStage('connect-four', { width: 760, height: 680 },
+        UI.gridBoard(view.w, view.h, (x, y) => {
+          const disc = view.grid[y][x];
+          const isWin = view.winCells?.some(([wy, wx]) => wy === y && wx === x);
+          return UI.gridButton('', () => send({ type: 'drop', col: x }), {
+            className: `disc ${disc || ''} ${isWin ? 'win' : ''}`,
+            disabled: !canPlay || !!view.grid[0][x],
+          });
+        }, { className: 'connect4' })),
     );
   },
 };
@@ -596,27 +603,32 @@ export const checkers = {
     el.appendChild(UI.turnBanner(view));
     const selected = view.chain;
     const moves = view.moves || [];
-    el.appendChild(UI.h('div', { class: 'checkers-wrap' },
-      UI.gridBoard(8, 8, (x, y) => {
-        const piece = view.board[y][x];
-        const dark = (x + y) % 2 === 1;
-        const isMine = piece && piece.owner === playerId;
-        const canGo = moves.some((m) => !view.chain && m.from.x === x && m.from.y === y) || (view.chain && view.chain.x === x && view.chain.y === y);
-        const targets = moves.filter((m) => m.from.x === x && m.from.y === y).map((m) => m.to);
-        return UI.gridButton(
-          piece ? UI.h('span', { class: `piece ${piece.owner === view.players[0].id ? 'dark' : 'light'} ${piece.king ? 'king' : ''}` }) : '',
-          () => {
-            if (isMine && !view.chain) send({ type: 'select', x, y });
-          },
-          { className: `${dark ? 'dark-square' : 'light-square'} ${canGo ? 'selectable' : ''} ${isMine ? 'mine' : ''}` },
-        );
-      }, { className: 'checkers' }),
-      UI.h('div', { class: 'hint-block' },
-        selected ? UI.pill(`Chained from ${coord(selected)} - pick a landing square`) : UI.muted('Tap a piece, then a highlighted target.'),
-        UI.h('div', { class: 'targets' },
-          moves.map((m) => UI.btn(`${coord(m.from)}→${coord(m.to)}${m.jump ? ' (jump)' : ''}`, () => send({ type: 'move', x: m.from.x, y: m.from.y, tx: m.to.x, ty: m.to.y }), { size: 'sm' })),
-        ),
-      )));
+    el.appendChild(Art.boardStage('checkers', { width: 760, height: 820 },
+      UI.h('div', { class: 'checkers-wrap' },
+        UI.gridBoard(8, 8, (x, y) => {
+          const piece = view.board[y][x];
+          const dark = (x + y) % 2 === 1;
+          const isMine = piece && piece.owner === playerId;
+          const canGo = moves.some((m) => !view.chain && m.from.x === x && m.from.y === y) || (view.chain && view.chain.x === x && view.chain.y === y);
+          // A landing square is lit, and a piece that owes a mandatory jump
+          // carries its own rim: the same "this is the one" cue the canvas
+          // sprites get from their rim light.
+          const jump = moves.some((m) => m.from.x === x && m.from.y === y && m.jump);
+          const isTarget = moves.some((m) => m.to.x === x && m.to.y === y);
+          return UI.gridButton(
+            piece ? UI.h('span', { class: `piece ${piece.owner === view.players[0].id ? 'dark' : 'light'} ${piece.king ? 'king' : ''}` }) : '',
+            () => {
+              if (isMine && !view.chain) send({ type: 'select', x, y });
+            },
+            { className: `${dark ? 'dark-square' : 'light-square'} ${canGo ? 'selectable' : ''} ${isMine ? 'mine' : ''} ${jump ? 'jump' : ''} ${isTarget ? 'target' : ''}` },
+          );
+        }, { className: 'checkers' }),
+        UI.h('div', { class: 'hint-block' },
+          selected ? UI.pill(`Chained from ${coord(selected)} - pick a landing square`) : UI.muted('Tap a piece, then a highlighted target.'),
+          UI.h('div', { class: 'targets' },
+            moves.map((m) => UI.btn(`${coord(m.from)}→${coord(m.to)}${m.jump ? ' (jump)' : ''}`, () => send({ type: 'move', x: m.from.x, y: m.from.y, tx: m.to.x, ty: m.to.y }), { size: 'sm' })),
+          ),
+        ))));
   },
 };
 
@@ -898,14 +910,15 @@ export const battleship = {
       ));
       el.appendChild(UI.h('div', { class: 'fleet-list' }, remaining.map((f) => UI.pill(`${f.name} (${f.size})`))));
       el.appendChild(
-        UI.gridBoard(size, size, (x, y) => {
-          const ship = (view.myBoard || []).find((s) => s.cells.some(([cx, cy]) => cx === x && cy === y));
-          const hit = ship?.hits?.some(([hx, hy]) => hx === x && hy === y);
-          return UI.gridButton(ship ? '🚢' : '', () => {
-            if (!remaining.length) return;
-            send({ type: 'place-ship', ship: remaining[0].id, x, y, dir });
-          }, { className: `ship ${ship ? 'occupied' : ''} ${hit ? 'hit' : ''}` });
-        }, { className: 'battleship' }),
+        Art.boardStage('battleship', { width: 660, height: 660 },
+          UI.gridBoard(size, size, (x, y) => {
+            const ship = (view.myBoard || []).find((s) => s.cells.some(([cx, cy]) => cx === x && cy === y));
+            const hit = ship?.hits?.some(([hx, hy]) => hx === x && hy === y);
+            return UI.gridButton(ship ? '🚢' : '', () => {
+              if (!remaining.length) return;
+              send({ type: 'place-ship', ship: remaining[0].id, x, y, dir });
+            }, { className: `ship ${ship ? 'occupied' : ''} ${hit ? 'hit' : ''}` });
+          }, { className: 'battleship' })),
       );
       return;
     }
@@ -913,8 +926,10 @@ export const battleship = {
     const myGrid = UI.gridBoard(size, size, (x, y) => {
       const ship = (view.myBoard || []).find((s) => s.cells.some(([cx, cy]) => cx === x && cy === y));
       const incoming = (view.enemyShots || []).find((s) => s.x === x && s.y === y);
+      // `ship` marks the grid, `occupied` marks the hull: the stylesheet plates
+      // only what is really there, so a miss on open water stays water.
       return UI.gridButton(incoming ? (incoming.hit ? '✳️' : '•') : ship ? '🚢' : '', () => {}, {
-        className: `ship ${incoming?.hit ? 'hit' : incoming ? 'miss' : ''} ${ship?.sunk ? 'sunk' : ''}`,
+        className: `ship ${ship ? 'occupied' : ''} ${incoming?.hit ? 'hit' : incoming ? 'miss' : ''} ${ship?.sunk ? 'sunk' : ''}`,
       });
     }, { className: 'battleship' });
 
@@ -927,10 +942,11 @@ export const battleship = {
     }, { className: 'battleship target-grid' });
 
     el.appendChild(UI.turnBanner(view));
-    el.appendChild(UI.h('div', { class: 'two-up' },
-      UI.panel('Your waters', myGrid),
-      UI.panel('Enemy waters', targetGrid),
-    ));
+    el.appendChild(Art.boardStage('battleship', { width: 980, height: 640 },
+      UI.h('div', { class: 'two-up' },
+        UI.panel('Your waters', myGrid),
+        UI.panel('Enemy waters', targetGrid),
+      )));
     if (view.enemySunk?.length) el.appendChild(UI.row(UI.muted('Enemy losses:'), ...view.enemySunk.map((s) => UI.pill(s.name, 'sunk'))));
   },
 };

@@ -49,6 +49,9 @@ export const DEFAULT_SETTINGS = {
   notifications: { friendRequests: true, partyInvites: true, sounds: true, mentions: true },
   privacy: { showInLobby: true, allowInvites: true, allowDms: 'friends', presence: 'online' },
   gameplay: { confirmMoves: false, autoReady: false, timers: true, largeText: false, colorblindSafe: false, lowSpec: false },
+  // Per-game memory (a game's remembered loadout/record), written by the client
+  // and stored opaquely - the server never interprets it.
+  games: {},
 };
 
 function deepMerge(base, patch) {
@@ -579,7 +582,7 @@ function matchPoints(scores, players) {
   return out;
 }
 
-export function recordGame(gameId, players = [], { roomId = null, winners = [], scores = null } = {}) {
+export function recordGame(gameId, players = [], { roomId = null, winners = [], scores = null, summary = null, review = null } = {}) {
   const points = matchPoints(scores, players);
   db.data.stats.gamesPlayed++;
   db.data.stats.byGame[gameId] = (db.data.stats.byGame[gameId] || 0) + 1;
@@ -612,7 +615,17 @@ export function recordGame(gameId, players = [], { roomId = null, winners = [], 
       user.coins += 12;
     }
   }
-  audit(null, 'game.finish', gameId, { roomId, players: players.map((p) => p.id), winners, points });
+  audit(null, 'game.finish', gameId, {
+    roomId,
+    players: players.map((p) => p.id),
+    winners,
+    points,
+    // How it ended, in the engine's own words, and - for a game that keeps one
+    // (see meta.review) - its review of the match.  The audit is the only place
+    // a finished game's detail survives, so the chess analysis reads it here.
+    summary: summary ? String(summary).slice(0, 200) : null,
+    review: review || null,
+  });
   db.touch();
 }
 
@@ -650,6 +663,286 @@ export function leaderboard(gameId = null, limit = 20) {
         games: u.stats.games,
         role: u.role,
       })),
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * Match history (admin analysis)
+ * ------------------------------------------------------------------ */
+
+/**
+ * One seat as the analysis shows it: the live account when we still have it
+ * (names change, accounts get deleted), the name it played under otherwise.
+ */
+function seatInfo(id, fallbackName = null, kind = 'human') {
+  const user = db.data.users[id];
+  return {
+    id,
+    name: user?.name || fallbackName || id || 'unknown',
+    avatar: user?.avatar || (kind === 'bot' ? '🤖' : '❔'),
+    role: user?.role || null,
+    kind,
+    account: !!user,
+  };
+}
+
+/** The end reason a pre-review match's summary implies, if it says anything. */
+function reasonFromSummary(summary) {
+  const text = String(summary || '');
+  if (/resign/i.test(text)) return 'resignation';
+  if (/checkmate/i.test(text)) return 'checkmate';
+  if (/50-move|fifty/i.test(text)) return 'fifty-move';
+  if (/insufficient/i.test(text)) return 'insufficient-material';
+  if (/threefold|repetition/i.test(text)) return 'repetition';
+  if (/stalemate/i.test(text)) return 'stalemate';
+  return null;
+}
+
+/**
+ * Every finished match of one game the arcade still knows about.
+ *
+ * Two sources hold different halves of the story, so they are merged by room id
+ * and each match counted once:
+ *  - persisted room snapshots - who sat down, who won, when it ran - which last
+ *    as long as the database does;
+ *  - the audit's `game.finish` entries - a rotating window (the newest few
+ *    thousand events across every game), but they carry the engine's review:
+ *    colours, plies, captures, opening moves and the end reason.
+ */
+function matchHistory(gameId) {
+  const matches = new Map();
+  for (const room of Object.values(db.data.rooms || {})) {
+    if (room?.gameId !== gameId || !room.result || !room.finishedAt) continue;
+    matches.set(room.id, {
+      roomId: room.id,
+      code: room.code || null,
+      at: room.result.at || room.finishedAt,
+      startedAt: room.startedAt || room.createdAt || null,
+      finishedAt: room.finishedAt,
+      players: (room.players || []).map((p) => seatInfo(p.id, p.name, p.kind)),
+      winners: (room.result.winners || []).slice(),
+      summary: room.result.summary || '',
+      points: null,
+      review: null,
+    });
+  }
+  for (const entry of db.data.audit || []) {
+    if (entry.action !== 'game.finish' || entry.target !== gameId) continue;
+    const meta = entry.meta || {};
+    let target = matches.get(meta.roomId || `audit:${entry.at}`);
+    if (!target) {
+      target = {
+        roomId: meta.roomId || null,
+        code: null,
+        at: entry.at,
+        startedAt: null,
+        finishedAt: entry.at,
+        players: [],
+        winners: [],
+        summary: '',
+        points: null,
+        review: null,
+      };
+      matches.set(meta.roomId || `audit:${entry.at}`, target);
+    }
+    // The audit is the richer side: it knows the points, the end reason and the
+    // engine's review, where a room snapshot only kept who won.
+    if (meta.winners) target.winners = meta.winners.slice();
+    if (meta.summary) target.summary = meta.summary;
+    if (meta.points) target.points = meta.points;
+    if (meta.review) target.review = meta.review;
+    // Seats, combined rather than replaced.  The audit names the humans who
+    // finished the match; the room snapshot names every seat including bots, but
+    // it is republished as players leave - a room that closed after the loser
+    // walked out has their seat missing from the snapshot, and the audit is the
+    // only place they survive.
+    if (meta.players?.length) {
+      const seats = new Map(target.players.map((p) => [p.id, p]));
+      for (const id of meta.players) if (!seats.has(id)) seats.set(id, seatInfo(id));
+      target.players = [...seats.values()];
+    }
+  }
+  return [...matches.values()].sort((a, b) => (a.at || 0) - (b.at || 0));
+}
+
+/**
+ * The admin console's chess analysis: every finished chess match the arcade can
+ * still account for, aggregated.
+ *
+ * Chess is the game whose history is worth reading twice - colour matters, how
+ * it ended matters, and a single opening line can explain a whole losing streak
+ * - so the shape here is a review, not a scoreboard: results by colour, the mix
+ * of endings, the openings that get played, who plays whom, who is beating whom,
+ * what a typical game costs in moves and minutes, and how much of it the arcade
+ * actually has data for (the audit window is finite and reviews only exist for
+ * matches finished since they were added).
+ */
+export function chessAnalysis({ days = 14, recent = 25 } = {}) {
+  const matches = matchHistory('chess');
+  const perPlayer = new Map();
+  const perPair = new Map();
+  const endings = new Map();
+  const openings = new Map();
+  const activity = new Map();
+  const bump = (map, key) => map.set(key, (map.get(key) || 0) + 1);
+
+  let decisive = 0;
+  let drawn = 0;
+  let whiteWins = 0;
+  let blackWins = 0;
+  let reviewed = 0;
+  let plies = 0;
+  let plyGames = 0;
+  let durationMs = 0;
+  let timedGames = 0;
+  let longest = null;
+  let quickest = null;
+
+  for (const match of matches) {
+    const seats = match.players.length ? match.players : [seatInfo('unknown')];
+    const winners = match.winners || [];
+    const won = winners.length > 0;
+    if (won) decisive++; else drawn++;
+    const review = match.review || null;
+    if (review) reviewed++;
+    const end = review?.end || reasonFromSummary(match.summary) || 'unrecorded';
+    bump(endings, end);
+
+    // Colour: only a reviewed match knows which seat played white.  A draw
+    // belongs to neither colour, so it counts towards neither tally.
+    if (won && review?.white && winners.includes(review.white)) whiteWins++;
+    else if (won && review?.black && winners.includes(review.black)) blackWins++;
+
+    if (Number.isFinite(review?.plies)) {
+      plies += review.plies;
+      plyGames++;
+      if (!longest || review.plies > longest.plies) longest = { at: match.at, plies: review.plies, players: seats, winners, code: match.code };
+      if (won && (!quickest || review.plies < quickest.plies)) quickest = { at: match.at, plies: review.plies, players: seats, winners, code: match.code, end };
+    }
+    if (match.startedAt && match.finishedAt && match.finishedAt > match.startedAt) {
+      durationMs += match.finishedAt - match.startedAt;
+      timedGames++;
+    }
+    const opening = Array.isArray(review?.opening) ? review.opening : null;
+    if (opening?.length) bump(openings, opening.slice(0, 2).join(' '));
+
+    for (const seat of seats) {
+      const row = perPlayer.get(seat.id) || {
+        id: seat.id, name: seat.name, avatar: seat.avatar, role: seat.role, kind: seat.kind,
+        played: 0, wins: 0, losses: 0, draws: 0, points: 0, white: 0, black: 0, lastAt: 0, streak: 0, bestStreak: 0,
+      };
+      // A seat that left the account list still counts; a rename should not
+      // split one player into two rows.
+      row.name = seat.name || row.name;
+      row.played++;
+      row.points += Number(match.points?.[seat.id]) || 0;
+      row.lastAt = Math.max(row.lastAt, match.at || 0);
+      if (seat.id === review?.white) row.white++;
+      if (seat.id === review?.black) row.black++;
+      if (won && winners.includes(seat.id)) {
+        row.wins++;
+        row.streak++;
+        row.bestStreak = Math.max(row.bestStreak, row.streak);
+      } else if (won) {
+        row.losses++;
+        row.streak = 0;
+      } else {
+        row.draws++;
+        row.streak = 0;
+      }
+      perPlayer.set(seat.id, row);
+    }
+
+    // Head to head, for the seats that actually met in this match.
+    if (seats.length === 2 && seats[0].id !== seats[1].id) {
+      const [a, b] = [...seats].sort((x, y) => String(x.id).localeCompare(String(y.id)));
+      const key = `${a.id}|${b.id}`;
+      const pair = perPair.get(key) || { a, b, matches: 0, aWins: 0, bWins: 0, draws: 0 };
+      pair.matches++;
+      if (!won) pair.draws++;
+      else if (winners.includes(a.id)) pair.aWins++;
+      else if (winners.includes(b.id)) pair.bWins++;
+      pair.lastAt = Math.max(pair.lastAt || 0, match.at || 0);
+      perPair.set(key, pair);
+    }
+
+    // Activity per calendar day, filled out for the whole window later.
+    const day = new Date(match.at || 0).toISOString().slice(0, 10);
+    bump(activity, day);
+  }
+
+  const start = now() - (days - 1) * 86400000;
+  const activityDays = [];
+  for (let i = 0; i < days; i++) {
+    const date = new Date(start + i * 86400000).toISOString().slice(0, 10);
+    activityDays.push({ date, matches: activity.get(date) || 0 });
+  }
+
+  const rank = (row) => row.played * 10 + row.wins;
+  const players = [...perPlayer.values()]
+    .map((row) => ({ ...row, winRate: row.played ? row.wins / row.played : 0 }))
+    .sort((a, b) => rank(b) - rank(a) || b.lastAt - a.lastAt);
+
+  const resultLabel = (match) => {
+    const winners = match.winners || [];
+    const nameOf = (id) => match.players.find((p) => p.id === id)?.name || 'someone';
+    if (!winners.length) return 'Draw';
+    const review = match.review;
+    if (review && winners.includes(review.white)) return `White won (${nameOf(review.white)})`;
+    if (review && winners.includes(review.black)) return `Black won (${nameOf(review.black)})`;
+    return `${winners.map(nameOf).join(' & ')} won`;
+  };
+
+  const shaped = matches.map((match) => ({
+    at: match.at,
+    roomId: match.roomId,
+    code: match.code,
+    players: match.players.map((p) => ({ id: p.id, name: p.name, avatar: p.avatar, kind: p.kind })),
+    winners: match.winners,
+    result: resultLabel(match),
+    end: match.review?.end || reasonFromSummary(match.summary) || 'unrecorded',
+    plies: Number.isFinite(match.review?.plies) ? match.review.plies : null,
+    minutes: match.startedAt && match.finishedAt && match.finishedAt > match.startedAt
+      ? Math.max(1, Math.round((match.finishedAt - match.startedAt) / 60000))
+      : null,
+    summary: match.summary || '',
+    opening: match.review?.opening || null,
+    reviewed: !!match.review,
+    humans: match.players.filter((p) => p.kind !== 'bot').length,
+  }));
+
+  return {
+    game: { id: 'chess', name: 'Chess', icon: '♞' },
+    totals: {
+      matches: matches.length,
+      decisive,
+      draws: drawn,
+      drawRate: matches.length ? drawn / matches.length : 0,
+      humans: new Set(matches.flatMap((m) => m.players.filter((p) => p.kind !== 'bot').map((p) => p.id))).size,
+      bots: new Set(matches.flatMap((m) => m.players.filter((p) => p.kind === 'bot').map((p) => p.id))).size,
+      vsBots: matches.filter((m) => m.players.some((p) => p.kind === 'bot')).length,
+      whiteWins,
+      blackWins,
+      reviewed,
+      avgPlies: plyGames ? plies / plyGames : null,
+      avgMinutes: timedGames ? durationMs / timedGames / 60000 : null,
+      longest: longest ? { at: longest.at, plies: longest.plies, names: longest.players.map((p) => p.name), code: longest.code } : null,
+      quickest: quickest ? { at: quickest.at, plies: quickest.plies, names: quickest.players.map((p) => p.name), code: quickest.code, end: quickest.end } : null,
+    },
+    endings: [...endings.entries()].map(([reason, count]) => ({ reason, count })).sort((a, b) => b.count - a.count),
+    openings: [...openings.entries()].map(([line, count]) => ({ line, count })).sort((a, b) => b.count - a.count).slice(0, 8),
+    players,
+    pairings: [...perPair.values()].sort((a, b) => b.matches - a.matches).slice(0, 12),
+    activity: activityDays,
+    busiestDay: activityDays.slice().sort((a, b) => b.matches - a.matches)[0] || null,
+    recent: shaped.slice(-recent).reverse(),
+    sources: {
+      rooms: Object.values(db.data.rooms || {}).filter((r) => r?.gameId === 'chess').length,
+      auditEntries: (db.data.audit || []).length,
+      auditCapped: (db.data.audit || []).length >= 2000,
+      from: matches[0]?.at || null,
+      to: matches[matches.length - 1]?.at || null,
+    },
   };
 }
 

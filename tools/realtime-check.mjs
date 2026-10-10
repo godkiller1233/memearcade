@@ -132,7 +132,10 @@ async function startServer() {
   console.log(`\nBooting a scratch server on port ${PORT}…`);
   child = spawn(process.execPath, [path.join(ROOT, 'server', 'index.js')], {
     cwd: ROOT,
-    env: { ...process.env, MEMES_PORT: String(PORT), MEMES_HOST: '127.0.0.1', MEMES_DATA: DATA, MEMES_PLATFORM: 'realtime-check', MEMES_PARTY_GRACE_MS: '700', MEMES_ROOM_GRACE_MS: '700' },
+    // A long waiting-room countdown keeps the suite in charge of when its rooms
+    // start: the arming and clearing are asserted below, and no check waits for
+    // an automatic start to fire.
+    env: { ...process.env, MEMES_PORT: String(PORT), MEMES_HOST: '127.0.0.1', MEMES_DATA: DATA, MEMES_PLATFORM: 'realtime-check', MEMES_PARTY_GRACE_MS: '700', MEMES_ROOM_GRACE_MS: '700', MEMES_AUTO_START_MS: '60000' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stderr.on('data', (b) => process.stderr.write(`[server] ${b}`));
@@ -240,7 +243,7 @@ function hudStub() {
  * client netcode: interpolation + prediction
  * ------------------------------------------------------------------ */
 
-function netcodeChecks(engine, { SnapshotBuffer, Predictor, blendWorld, patchLocalSeat, netHudText, roomAlertText, KeyframeGate, LinkSignal, INTERP_DELAY, MIN_INTERP_DELAY, MAX_INTERP_DELAY }) {
+function netcodeChecks(engine, { SnapshotBuffer, Predictor, blendWorld, patchLocalSeat, netHudText, roomAlertText, hostStreamText, KeyframeGate, LinkSignal, INTERP_DELAY, MIN_INTERP_DELAY, MAX_INTERP_DELAY }) {
   console.log('\nClient netcode (interpolation + prediction)…');
 
   /* world blending */
@@ -315,8 +318,34 @@ function netcodeChecks(engine, { SnapshotBuffer, Predictor, blendWorld, patchLoc
     stalledAt += i % 2 ? 400 : 20;
     stalled.push({ n: i }, stalledAt);
   }
-  check(stalled.delay > 200 && stalled.delay <= MAX_INTERP_DELAY, `a stalling stream pins the delay at its ceiling (${stalled.delay.toFixed(1)}ms)`);
+  // The delay's ceiling now follows the measured cadence (see retune): a
+  // stream whose arrivals are genuinely far apart is allowed to lag past its
+  // own gap instead of running dry on every frame, so what matters here is the
+  // behaviour - the cursor is never starved between arrivals - not the old
+  // fixed 250ms bound.
+  check(stalled.delay > 200, `a stalling stream widens the delay to cover its gaps (${stalled.delay.toFixed(1)}ms)`);
+  let drySamples = 0;
+  for (let at = stalledAt - 1200; at <= stalledAt; at += 20) if (stalled.starved(at)) drySamples++;
+  check(drySamples === 0, `the widened delay keeps a jittery timeline fed between arrivals (${drySamples} dry samples)`);
   check(stalled.sample(stalledAt + 5000).n === 29, 'the adaptive timeline still samples the newest world');
+
+  /* a host tab in the background streams about once a second: the timeline
+     must stretch to that cadence, or every remote seat freezes solid the
+     moment the browser clamps the host's timers */
+  const sparse = new SnapshotBuffer();
+  let sparseAt = 1_000_000;
+  let sparseX = 0;
+  for (let i = 0; i < 8; i++) {
+    sparseX += 60;
+    sparse.push({ ball: { x: sparseX } }, sparseAt);
+    sparseAt += 1000;
+  }
+  const sparseNewestAt = sparseAt - 1000;
+  check(sparse.delay > MAX_INTERP_DELAY, `a 1/s stream stretches the delay past the fast bound (${sparse.delay.toFixed(0)}ms)`);
+  check(!sparse.starved(sparseNewestAt + 300), 'the stretched timeline is not dry 300ms after the newest frame');
+  const sparseMid = sparse.sample(sparseNewestAt - 600).ball.x;
+  const sparseNewest = sparse.sample(sparseNewestAt).ball.x;
+  check(sparseMid > 0 && sparseMid < sparseNewest, `the picture keeps moving between the sparse frames (${sparseMid.toFixed(1)} → ${sparseNewest.toFixed(1)})`);
 
   /* the network readout line */
   const remoteHud = netHudText({ ping: 42.4, rate: 19.8, depth: 3, delay: 88 });
@@ -340,6 +369,18 @@ function netcodeChecks(engine, { SnapshotBuffer, Predictor, blendWorld, patchLoc
   check(roomAlertText({ hostName: 'Ada', nextName: 'Bo', until: 5000 }, 5000) === 'Ada lost connection — Bo takes over now.',
     'a passed deadline reads as now, not a negative count');
   check(roomAlertText({ until: 1000 }, 5000) === 'The host lost connection — the room closes now.', 'an unnamed host still gets a line');
+
+  /* the host-stream banner line (hostStreamText) */
+  check(hostStreamText(null) === null && hostStreamText(undefined) === null, 'a healthy stream shows no room banner');
+  const hiddenLine = hostStreamText({ hidden: true, hostName: 'Ada' });
+  check(hiddenLine?.includes('Ada') && hiddenLine.includes('background tab'), `a hidden host tab is announced to the room (${hiddenLine})`);
+  check(hostStreamText({ hidden: true, hostName: 'Ada' }, { self: true }).startsWith('Your tab is in the background'),
+    'the host reads the same banner about their own tab');
+  const streamStallLine = hostStreamText({ stalled: true, hidden: true, hostName: 'Ada' });
+  check(streamStallLine?.includes('Ada') && streamStallLine.includes('stopped streaming'), `a stalled stream outranks a hidden tab (${streamStallLine})`);
+  check(hostStreamText({ stalled: true }, { self: true }).startsWith('Your tab stopped streaming'),
+    'the host is told to bring their tab back');
+  check(hostStreamText({ hidden: true })?.startsWith('The host '), 'an unnamed host still gets a line', hostStreamText({ hidden: true }));
 
   /* the cue's state machine: dry -> reconnecting, refilling -> recovering */
   const signal = new LinkSignal();
@@ -532,6 +573,20 @@ function streamClockChecks(engine, { StreamClock }) {
   const pauseSlices = pause.advance(60000);
   check(pauseSlices >= 1 && pauseSlices * pause.step <= pause.maxCatchup + 1e-6, `a one-minute pause warps the world at most ${pause.maxCatchup}ms (${pauseSlices} fixed slices)`);
 
+  /* a hidden tab: the browser clamps its timers to about a second, so the bank
+     takes that much real time and the world stays in step with the wall clock */
+  const sleepy = new StreamClock();
+  sleepy.reset(0);
+  let sleepyAt = 0;
+  let sleepyTime = 0;
+  for (let i = 0; i < 30; i++) {
+    sleepyAt += 1000;
+    sleepyTime += sleepy.advance(sleepyAt, 5000) * sleepy.step;
+  }
+  check(Math.abs(sleepyTime - sleepyAt) <= sleepy.step, `a hidden tab's 1s wakes still simulate all ${sleepyAt}ms of real time (${sleepyTime.toFixed(0)}ms)`);
+  const hiddenPause = sleepy.advance(sleepyAt + 60000, 5000);
+  check(hiddenPause > 0 && hiddenPause * sleepy.step <= 5000 + 1e-6, `a minute-long hidden wake warps the world at most the background cap (${(hiddenPause * sleepy.step).toFixed(0)}ms)`);
+
   /* once the timer recovers, the full 20/s cadence is back immediately */
   const recovery = new StreamClock();
   recovery.reset(0);
@@ -601,10 +656,25 @@ async function run(engine, OnlineHost) {
   check(!!code, 'host opened a Ping Pong room', code ? `code ${code}` : 'no code');
   if (!code) return;
 
+  check(created?.room?.autoStartAt === 0, 'a room sitting alone does not count down', String(created?.room?.autoStartAt));
   guestClient.send({ t: 'room', op: 'join', code });
   const joined = await guestClient.waitFor('game', (m) => m.room?.players?.length === 2);
   check(!!joined, 'guest joined the room', joined ? '' : 'guest never saw the room');
   check(joined?.room?.host === hostAccount.id, 'the room host is the first account');
+
+  /* 1b. the waiting-room countdown: the moment a room has company it advertises
+         when it will start itself, and the deadline travels to every seat. */
+  const armed = await host.waitFor('game', (m) => m.room?.autoStartAt > 0, 3000);
+  const armedAt = armed?.at || Date.now();
+  const armedMs = Number(armed?.room?.autoStartMs);
+  check(!!armed, 'a waiting room with company arms its auto-start countdown');
+  check(Number.isFinite(armedMs) && armedMs >= 3000, 'the room advertises how long the countdown runs', String(armed?.room?.autoStartMs));
+  check(armed?.room?.autoStartAt > armedAt && armed.room.autoStartAt - armedAt <= armedMs,
+    'the countdown deadline sits inside the advertised window',
+    `${armed?.room?.autoStartAt ? armed.room.autoStartAt - armedAt : '--'}ms of ${armedMs}ms`);
+  const guestArmed = await guestClient.waitFor('game', (m) => m.room?.autoStartAt > 0, 3000);
+  check(guestArmed?.room?.autoStartAt === armed?.room?.autoStartAt,
+    'every seat is told the same deadline', String(guestArmed?.room?.autoStartAt));
 
   /* 2. start: the host is handed the pristine world */
   host.send({ t: 'room', op: 'start' });
@@ -702,6 +772,48 @@ async function run(engine, OnlineHost) {
   const storm = host.of('room:request').slice(stormBefore);
   check(storm.length === 2, `both viewers' requests in the same window reached the host (${storm.length})`);
   check(new Set(storm.map((m) => m.from)).size === 2, 'the herd came from two different viewers');
+
+  /* 4f. the host's stream is the room's heartbeat: a hidden tab is announced
+        the moment it hides, a stream that actually stops is called out to the
+        room and to the host, and the first snapshot after a stall clears it */
+  host.send({ t: 'game', action: { type: 'tick', snapshot: state } });
+  await sleep(150);
+  check(!host.of('game').slice(-1)[0]?.room?.hostStream, 'a healthy stream puts no warning on the room');
+
+  host.send({ t: 'room', op: 'visibility', hidden: true });
+  const hiddenInfo = await guestClient.waitFor('game', (m) => m.room?.hostStream?.hidden === true, 2000);
+  check(!!hiddenInfo, 'a hidden host tab shows up in the room state');
+  check(hiddenInfo?.room?.hostStream?.stalled === false, 'a hidden tab is not the same as a stalled stream');
+  check(hiddenInfo?.room?.hostStream?.hostName === hostAccount.name, 'the warning names the host', hiddenInfo?.room?.hostStream?.hostName);
+  const hiddenChat = await guestClient.waitFor('chat', (m) => /background tab/.test(m.message?.text || ''), 2000);
+  check(!!hiddenChat, 'the room chat says why frames got choppier', hiddenChat?.message?.text);
+
+  const gamesBefore = guestClient.of('game').length;
+  guestClient.send({ t: 'room', op: 'visibility', hidden: true });
+  await sleep(250);
+  check(guestClient.of('game').length === gamesBefore, "a seat's visibility report is ignored");
+
+  host.send({ t: 'room', op: 'visibility', hidden: false });
+  const backInfo = await guestClient.waitFor('game', (m) => m.room?.hostStream === null, 2000);
+  check(!!backInfo, 'coming back to the foreground clears the room warning');
+  const backChat = await guestClient.waitFor('chat', (m) => /back in the foreground/.test(m.message?.text || ''), 2000);
+  check(!!backChat, 'the room hears that the host is back');
+
+  const stallAt = Date.now();
+  const stalledInfo = await host.waitFor('game', (m) => m.at >= stallAt && m.room?.hostStream?.stalled === true, 8000);
+  check(!!stalledInfo, `the room notices a silent host (${stalledInfo ? stalledInfo.at - stallAt : '--'}ms of quiet)`);
+  check(stalledInfo?.room?.hostStream?.hidden === false, 'a stall stands on its own, not as a hidden tab');
+  const stallChat = await guestClient.waitFor('chat', (m) => /stopped streaming/.test(m.message?.text || ''), 3000);
+  check(!!stallChat, 'the room chat says the match is waiting on the host tab', stallChat?.message?.text);
+  const hostWarned = await host.waitFor('notify', (m) => m.kind === 'host-stream', 3000);
+  check(!!hostWarned, 'the host is warned directly');
+  check((hostWarned?.text || '').includes('foreground'), 'the warning tells the host what to do', hostWarned?.text);
+
+  host.send({ t: 'game', action: { type: 'tick', snapshot: state } });
+  const recovered = await host.waitFor('game', (m) => m.room?.hostStream === null, 3000);
+  check(!!recovered, 'the first snapshot after a stall clears the warning');
+  const recoverChat = await guestClient.waitFor('chat', (m) => /streaming again/.test(m.message?.text || ''), 3000);
+  check(!!recoverChat, 'the room hears that the stream is back', recoverChat?.message?.text);
 
   /* 4e. a viewer's HUD reads a host stall as reconnecting, then recovering */
   const viewerHud = hudStub();
@@ -952,6 +1064,19 @@ async function run(engine, OnlineHost) {
     const tookSeat = await rHost.waitFor('game', (m) => m.room?.players?.length === 2, 3000);
     check(!!tookSeat, 'the second account takes a seat in the room');
 
+    // The waiting room's Invite button: a member asks a friend in one tap, and
+    // the notification carries everything that friend needs to join.
+    const invitedAt = Date.now();
+    rHost.send({ t: 'room', op: 'invite', name: specAccount.name });
+    const invite = await rWatch.waitFor('notify', (m) => m.at >= invitedAt && m.kind === 'room-invite', 3000);
+    check(!!invite, 'a room invite reaches the friend as a notification');
+    check(invite?.code === seatCode && invite?.roomId === freshRoom?.room?.id && invite?.from?.id === hostAccount.id,
+      'the invite carries the room code, its id and who sent it',
+      JSON.stringify(invite ? { code: invite.code, roomId: invite.roomId, from: invite.from?.name } : null));
+    rHost.send({ t: 'room', op: 'invite', name: 'nobody-by-that-name' });
+    const inviteError = await rHost.waitFor('error', (m) => m.at >= invitedAt && /User not found/.test(m.message || ''), 2000);
+    check(!!inviteError, 'inviting a username nobody holds answers with an error');
+
     // The drop flips the seat offline at once; the grace then removes it.
     const seatDropAt = Date.now();
     rGuest.close();
@@ -963,6 +1088,10 @@ async function run(engine, OnlineHost) {
       'a dropped guest seat raises no host-outage countdown');
     const seatCleaned = await rHost.waitFor('game', (m) => m.at >= seatDropAt && !m.room?.players?.some((p) => p.id === guestAccount.id), TARGET ? 45000 : 4000);
     check(!!seatCleaned, 'the disconnected seat is removed after the grace window', JSON.stringify(seatCleaned?.room?.players?.map((p) => p.name)));
+    // A room left alone must stop counting down to a start that can no longer
+    // happen - the deadline is withdrawn, not left as a stale promise.
+    const disarmed = await rHost.waitFor('game', (m) => m.at >= seatDropAt && m.room?.players?.length === 1 && m.room?.autoStartAt === 0, 3000);
+    check(!!disarmed, 'the countdown clears when the room is left alone', String(seatCleaned?.room?.autoStartAt));
     if (TARGET && seatCleaned) roomGraceMs = Math.max(500, seatCleaned.at - seatDropAt + 1000);
 
     // A blip inside the window keeps the seat - and it must survive the window.
@@ -1268,6 +1397,77 @@ async function stressRun(engine, OnlineHost, accounts) {
 }
 
 /* ------------------------------------------------------------------ *
+ * the host tab's own visibility
+ * ------------------------------------------------------------------ */
+
+/**
+ * A hidden host tab is the one warning the server cannot see for itself until
+ * the stream has already gone quiet, so the host's client reports it the
+ * moment it hides - and marks its own tab while it is away.  This drives that
+ * handler directly: the browser's visibility API cannot be faked in the
+ * preview panel these checks are developed against, but the handler only reads
+ * `document.visibilityState` and sends one room message, so a stand-in covers
+ * it.  The handler also arms a "you were away, the room slowed down" notice on
+ * return; that fires only after five seconds away (and needs a DOM to show), so
+ * this test comes straight back and asserts the parts that do not touch it.
+ */
+function hostVisibilityChecks(OnlineHost, rt) {
+  console.log('\nHost tab visibility…');
+  const listeners = new Map();
+  const titleBefore = 'Memes Arcade';
+  const fakeDoc = {
+    visibilityState: 'visible',
+    title: titleBefore,
+    addEventListener: (type, fn) => listeners.set(type, fn),
+    removeEventListener: (type) => listeners.delete(type),
+  };
+  const sent = [];
+  const realSend = rt.send;
+  globalThis.document = fakeDoc;
+  rt.send = (msg) => { sent.push(msg); return true; };
+  try {
+    const host = new OnlineHost({
+      mount: null,
+      room: { id: 'vis-room', status: 'playing', host: 'me', players: [], spectators: [] },
+      view: null,
+      playerId: 'me',
+    });
+    // The stream only runs with an engine and a world in hand.
+    host.engine = { meta: { realtime: true }, over: () => ({ over: false }) };
+    host.state = { winnerId: null, paddles: {} };
+    host.liveCanvas = true; // keeps render() off the DOM
+    check(listeners.has('visibilitychange'), 'the host listens for its tab hiding');
+
+    fakeDoc.visibilityState = 'hidden';
+    listeners.get('visibilitychange')();
+    check(host.hidden === true, 'hiding the tab puts the host into background streaming');
+    check(fakeDoc.title === `⚠ ${titleBefore}`, `the tab itself carries the warning (${fakeDoc.title})`);
+    check(sent.some((m) => m.t === 'room' && m.op === 'visibility' && m.hidden === true),
+      'the room is told the host tab hid', JSON.stringify(sent.slice(-1)[0] || null));
+
+    // With the tab hidden the bank may hold a whole (clamped) second of real
+    // time, instead of the 200ms a visible tab is held to.
+    const clock = host.clock;
+    clock.reset(0);
+    const hiddenSteps = clock.advance(1000, host.hidden ? 5000 : clock.maxCatchup);
+    check(Math.abs(hiddenSteps * clock.step - 1000) <= clock.step,
+      `a hidden host still simulates a full second per delayed wake (${(hiddenSteps * clock.step).toFixed(0)}ms)`);
+
+    fakeDoc.visibilityState = 'visible';
+    listeners.get('visibilitychange')();
+    check(host.hidden === false, 'coming back restores normal streaming');
+    check(fakeDoc.title === titleBefore, 'the warning marker leaves the tab title');
+    check(sent.some((m) => m.t === 'room' && m.op === 'visibility' && m.hidden === false), 'the room hears the host is back');
+
+    host.dispose();
+    check(!listeners.has('visibilitychange'), 'disposing the host drops the visibility listener');
+  } finally {
+    rt.send = realSend;
+    delete globalThis.document;
+  }
+}
+
+/* ------------------------------------------------------------------ *
  * main
  * ------------------------------------------------------------------ */
 
@@ -1278,6 +1478,7 @@ if (!engine?.meta?.realtime) {
 }
 const netcode = await import(pathToFileURL(path.join(ROOT, 'web', 'js', 'netcode.js')).href);
 const { OnlineHost } = await import(pathToFileURL(path.join(ROOT, 'web', 'js', 'host.js')).href);
+const { rt } = await import(pathToFileURL(path.join(ROOT, 'web', 'js', 'realtime.js')).href);
 
 try {
   let ready = true;
@@ -1288,6 +1489,7 @@ try {
   if (ready) {
     netcodeChecks(engine, netcode);
     streamClockChecks(engine, netcode);
+    hostVisibilityChecks(OnlineHost, rt);
     if (!TARGET) await startServer();
     const accounts = await run(engine, OnlineHost);
     if (STRESS && accounts) await stressRun(engine, OnlineHost, accounts);

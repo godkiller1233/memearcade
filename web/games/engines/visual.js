@@ -99,6 +99,8 @@ function buildScenePair(seed, rng, diffCount) {
 export const spotDifference = {
   meta: {
     id: 'spot-difference',
+    // Points for every difference spotted - more when you are first to it.
+    record: { best: 'high', label: 'points' },
     name: 'Spot the Difference',
     icon: '🔍',
     category: 'puzzle',
@@ -323,6 +325,8 @@ function zoomPick(label, rng) {
 export const zoomedImage = {
   meta: {
     id: 'zoomed-image',
+    // Points for reading the scene before it zooms out into the obvious.
+    record: { best: 'high', label: 'points' },
     name: 'Guess the Zoomed Image',
     icon: '🔬',
     category: 'puzzle',

@@ -3,17 +3,18 @@
  * Boot -> compatibility check -> session restore -> auth or app shell,
  * then a small router drives the views while the WebSocket keeps state fresh.
  */
-import { $, el, clear, btn, pill, avatar, toast, modal, fmtNum } from './dom.js';
+import { $, el, clear, btn, pill, avatar, toast, modal, fmtNum, timeAgo } from './dom.js';
 import {
   state, loadLocal, saveLocal, applyTheme, cycleTheme, notify, onChange, setSettings,
   setMe, merge, isStaff, isAdmin, resetClientState, setServerConfig, featureOn, featureHidden, featureRaw,
+  gameMemory, rememberGame, gameProgress, clearGameProgress,
   CLIENT_VERSION,
 } from './store.js';
 import { api, fetchMeta, restoreSession, login, register, guest, logout, loadCatalog, isSignedIn } from './api.js';
 import { rt, sendChat, addBot, startRoom } from './realtime.js';
-import { views, startSoloGame, promptJoinCode, shareRoom, shareParty } from './views.js';
+import { views, startSoloGame, promptJoinCode, shareRoom, shareParty, roomRulesLine, recordText, resumeSoloRun } from './views.js';
 import { LocalHost, OnlineHost, seatsFor } from './host.js';
-import { roomAlertText } from './netcode.js';
+import { roomAlertText, hostStreamText } from './netcode.js';
 import { unlockAudio, toggleMusic, sfx, currentTrack } from './audio.js';
 import { loadEngine } from '../games/engines/registry-loader.js';
 import { watchBuilds } from './build-watch.js';
@@ -174,7 +175,7 @@ const VIEW_FEATURE = {
 
 const VIEW_LABEL = {
   catalog: 'The game library',
-  lobby: 'The lobby',
+  lobby: 'The servers list',
   chat: 'Chat',
   friends: 'Friends',
   suggestions: 'The idea board',
@@ -306,7 +307,12 @@ function renderStatus() {
     }
   }
   const counts = $('#status-counts');
-  if (counts && state.lobbyStats) counts.textContent = `${fmtNum(state.lobbyStats.online)} online · ${state.lobby?.length || 0} open rooms`;
+  // The lobby payload counts tables, not people: the online number comes from
+  // the global stats (the socket's statsGlobal, or the /api/stats read).
+  const online = state.globalStats?.online ?? state.lobbyStats?.online;
+  if (counts && (state.lobbyStats || state.globalStats)) {
+    counts.textContent = `${fmtNum(online || 0)} online · ${state.lobby?.length || 0} open rooms`;
+  }
 }
 
 /** Pending-report count on the Admin tab, refreshed when reports arrive. */
@@ -425,13 +431,16 @@ function joinPartyInvite(code) {
 let activeHost = null;
 let pendingStage = null;
 
-export function mountGame({ mode, game, engine, humans = 2 }) {
+export function mountGame({ mode, game, engine, humans = 2, options = {}, resume = null }) {
   activeHost?.dispose();
   activeHost = null;
   pendingStage = null;
   // Leaving a room to play alone: the server should drop our seat.
   if (mode !== 'online' && state.room) leaveCurrentRoom();
-  state.localGame = { mode, game, engine, humans };
+  // `options` carries the player's remembered table rules (see gameLoadout in
+  // store.js); an engine that keeps memory opens on them instead of defaults,
+  // and `resume` re-opens a solo run the player left half-played.
+  state.localGame = { mode, game, engine, humans, options, resume };
   if (mode === 'online') mountOnlineStage();
   setView('play');
 }
@@ -470,8 +479,6 @@ views.play = (mount) => {
       ),
       el('div', { class: 'row' },
         inLobby && isHost ? btn(room.canStart ? 'Start game' : 'Waiting for players', () => startRoom(), { variant: 'primary', disabled: !room.canStart, cls: 'sm' }) : null,
-        inLobby && isHost && featureOn('bots') ? btn('Add bot', () => addBot(2), { cls: 'sm' }) : null,
-        inLobby ? btn('Invite', () => shareRoom(room), { cls: 'sm' }) : null,
         !inLobby ? btn('Rematch', () => {
           if (room) { if (isHost) rt.send({ t: 'room', op: 'rematch' }); }
           else if (local) mountGame({ ...local });
@@ -479,8 +486,18 @@ views.play = (mount) => {
         btn('Exit', () => exitGame(), { cls: 'sm', variant: 'danger' }),
       ),
     ),
-    room ? el('div', { class: 'waiting-list', id: 'room-seats' }, room.players.map(seatChip)) : null,
+    room ? el('div', { class: 'waiting-list', id: 'room-seats' }, seatChips(room)) : null,
+    !inLobby && local ? recordStripEl(local) : null,
+    // A live realtime match lives on the host's tab - the world is simulated
+    // right here, so say that before the browser throttles it, not after.
+    room && !inLobby && isHost && room.realtime
+      ? el('p', { class: 'muted small', text: "You're hosting this match: the world runs in this tab, so keep it open. A hidden tab still streams, but frames get choppier for everyone else." })
+      : null,
   ));
+
+  // A fresh online room is never just dead air: the waiting-room card shows the
+  // start countdown and the one-tap ways to fill the empty seats.
+  if (room && inLobby) mount.appendChild(waitingRoomCard(room, isHost));
 
   // A dropped host freezes the room until hosting migrates; the countdown
   // banner (filled by syncRoomAlert) says who takes over and when.
@@ -490,20 +507,183 @@ views.play = (mount) => {
   mount.appendChild(stage);
   pendingStage = stage;
 
+  // Hot-seat only.  The hint belongs to the shell rather than the stage: the
+  // engine repaints the stage on every action, which used to wipe the one
+  // instruction everyone sharing the device needs to see.
+  if (local?.mode === 'local' && (local.humans ?? 2) > 1) {
+    mount.appendChild(el('div', { class: 'card' },
+      el('p', { class: 'muted small', text: 'Playing on one device - the active player is shown above. Pass the device when the turn changes.' })));
+  }
+
   if (room && !inLobby) mountOnlineStage(stage);
   else if (room) {
     stage.appendChild(el('div', { class: 'col' },
       el('p', { class: 'muted', text: isHost
-        ? 'Ready when you are - add bots or share the code, then hit Start game.'
+        ? 'The room starts on its own once it is ready - or hit Start game to begin now.'
         : 'Waiting for the host to start the game.' }),
       el('p', { class: 'muted small', text: 'Everyone on your wifi can join with the code above (or the LAN link the server prints at boot).' }),
+      // The same rules the play sheet advertised for this room, so nobody is
+      // surprised by the loadout once the match starts.
+      el('div', { class: 'row' }, pill('rules'), roomRulesLine(room)),
     ));
   } else if (local) mountLocalStage(stage, local);
-  else stage.appendChild(el('p', { class: 'muted', text: 'Pick a game to start playing.' }));
+  else stage.appendChild(emptyStage());
 
   if (room && featureOn('chat')) mount.appendChild(roomChatCard());
   syncRoomAlert();
 };
+
+/**
+ * The waiting room's own card: the countdown to an automatic start, the rules
+ * the match will play by, and the two one-tap ways to fill the empty seats.
+ *
+ * A fresh online room used to be dead air at "1 player".  The server arms a
+ * start clock as soon as the room has company, the clock is drawn right here
+ * ("starting in N…"), and the actions that fill the room - a bot now, a
+ * friend's invitation - sit next to it so nobody has to sit in a quiet room.
+ */
+function waitingRoomCard(room, isHost) {
+  const min = Number(room.game?.players?.min) || 2;
+  const missing = Math.max(0, min - (room.players?.length || 0));
+  const nudge = room.autoStartAt
+    ? 'The match starts on its own - add a bot or invite a friend before it does.'
+    : missing > 0
+      ? `${missing} more player${missing === 1 ? '' : 's'} needed - add a bot or invite a friend to get going.`
+      : 'Ready when you are.';
+  return el('div', { class: 'card room-waiting', id: 'room-waiting' },
+    el('div', { class: 'room-countdown', id: 'room-countdown', hidden: !room.autoStartAt },
+      el('div', { class: 'row spread' },
+        el('span', { class: 'row' },
+          el('span', { class: 'icon', text: '⏳' }),
+          el('span', { text: 'Starting in ' }),
+          el('strong', { class: 'countdown-num', text: '…' }),
+          el('span', { text: '…' })),
+        pill('auto-start', 'good')),
+      el('div', { class: 'countdown-bar' }, el('span', { class: 'countdown-fill' }))),
+    el('p', { class: 'muted', text: nudge }),
+    el('div', { class: 'row' }, pill('rules'), roomRulesLine(room)),
+    el('div', { class: 'row' },
+      btn('➕ Invite a friend', () => inviteFriendDialog(room), { variant: 'primary' }),
+      isHost && featureOn('bots') ? btn('🤖 Add bot', () => addBot(2), { cls: 'sm' }) : null),
+  );
+}
+
+/**
+ * Invite a friend straight into this room: picking one sends a notification
+ * that joins in a single tap.  The copyable link stays as the fallback for
+ * someone who is not on the friends list yet.
+ */
+function inviteFriendDialog(room) {
+  const friends = state.friends.filter((f) => f.friendStatus === 'accepted');
+  const online = friends.filter((f) => f.presence && f.presence !== 'offline');
+  const offline = friends.filter((f) => !online.includes(f));
+  const list = el('div', { class: 'col' });
+  const invite = (payload, name) => {
+    rt.send({ t: 'room', op: 'invite', ...payload });
+    toast(name ? `Invited ${name} to room ${room.code}` : `Invite sent for room ${room.code}`, 'good');
+  };
+  const row = (f) => el('div', { class: 'friend-row' },
+    el('span', { class: `presence ${f.presence || 'offline'}` }),
+    avatar(f),
+    el('div', { class: 'name' },
+      el('strong', { text: f.name }),
+      el('div', { class: 'muted small', text: `${f.presence || 'offline'} · level ${f.level ?? '?'}` })),
+    btn('Invite', () => invite({ userId: f.id }, f.name), { variant: 'primary', cls: 'sm' }),
+  );
+  if (online.length) list.append(el('h4', { text: 'Online now' }), ...online.map(row));
+  if (offline.length) list.append(el('h4', { text: 'Offline' }), ...offline.map(row));
+  if (!friends.length) list.append(el('p', { class: 'muted small', text: 'No friends yet - send them the code below instead.' }));
+  const name = el('input', { class: 'input', placeholder: 'Username' });
+  const sendByName = () => {
+    const value = name.value.trim();
+    if (!value) return;
+    invite({ name: value }, value);
+    name.value = '';
+  };
+  name.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') sendByName(); });
+  const handle = modal('Invite a friend', el('div', { class: 'col' },
+    el('p', { class: 'muted', text: `They get a one-tap invite to room ${room.code} (${room.game?.name || room.gameId}).` }),
+    list,
+    el('div', { class: 'input-row' }, name, btn('Send', sendByName, { variant: 'primary', cls: 'sm' })),
+    el('div', { class: 'row' }, btn('🔗 Copy invite link', () => { shareRoom(room); handle.close(); }, { cls: 'sm' })),
+  ));
+}
+
+/**
+ * Every solo run this account walked away from, newest first.  Only a game whose
+ * engine asked to be resumable ever writes one, so the list needs no other
+ * filter; the catalog supplies the name and icon.
+ */
+function savedRuns() {
+  const out = [];
+  for (const gameId of Object.keys(state.settings?.games || {})) {
+    const progress = gameProgress(gameId);
+    if (!progress) continue;
+    const game = state.catalog.find((g) => (g.engine || g.id) === gameId)
+      || { id: gameId, name: gameId, icon: '🎮' };
+    out.push({ gameId, progress, game });
+  }
+  return out.sort((a, b) => (b.progress.savedAt || 0) - (a.progress.savedAt || 0));
+}
+
+/**
+ * What the stage shows when nothing is running.
+ *
+ * Reloading the page during a game comes back to this view (the shell remembers
+ * where you were), and without this it was a dead end: the saved runs are
+ * exactly what the player came back for.
+ */
+function emptyStage() {
+  const saved = savedRuns();
+  if (!saved.length) return el('p', { class: 'muted', text: 'Pick a game to start playing.' });
+  return el('div', { class: 'col' },
+    el('p', { class: 'muted', text: 'Pick a game to start playing - or pick up a run you left half-played.' }),
+    el('div', { class: 'col' }, saved.map((run) => el('div', { class: 'row spread room-row' },
+      el('span', { class: 'icon', text: run.game.icon || '🎮' }),
+      el('div', { class: 'name' },
+        el('strong', { text: run.game.name || run.gameId }),
+        el('div', { class: 'muted small', text: `${run.progress.label || 'in progress'} · saved ${timeAgo(run.progress.savedAt)}` })),
+      el('div', { class: 'row' },
+        btn('Continue', () => resumeSoloRun(run.game, run.progress), { variant: 'primary', cls: 'sm' }),
+        btn('Discard', () => {
+          clearGameProgress(run.gameId);
+          renderApp();
+        }, { cls: 'sm' }),
+      ),
+    ))),
+  );
+}
+
+/**
+ * The line under the in-game header: what this account has already done at this
+ * game.  It fills from memory - the same record the engine's memory port reads -
+ * and the finish line refreshes it in place, so a new best appears the moment
+ * the match ends rather than on the next reload.
+ */
+function recordStripEl(local) {
+  const meta = local.engine?.meta;
+  if (!meta?.record) return null;
+  const text = recordText(gameMemory(local.game.engine || local.game.id), meta);
+  // The element exists for games that keep a record even before the first one
+  // lands: the finish line fills it in place, and a blank line stays hidden.
+  return el('div', { class: `row record-strip${text ? '' : ' hidden'}`, id: 'game-record' },
+    el('span', { class: 'record-icon', text: '🏆' }),
+    el('span', { class: 'muted small record-text', text }));
+}
+
+/** Refresh that line from a fresh record (a finished match just wrote one). */
+function setRecordStrip(memory, meta = state.localGame?.engine?.meta) {
+  const strip = $('#game-record');
+  if (!strip) return;
+  const text = recordText(memory, meta);
+  const label = strip.querySelector('.record-text');
+  if (!text) {
+    strip.classList.add('hidden');
+    return;
+  }
+  strip.classList.remove('hidden');
+  if (label) label.textContent = text;
+}
 
 function exitGame() {
   activeHost?.dispose();
@@ -534,25 +714,63 @@ function roomChatCard() {
 
 let roomAlertTimer = null;
 
-/** Fill the host-outage banner from the room's countdown (no-op off-screen). */
+/**
+ * Fill the room banner: a host outage takes priority (the room is failing
+ * over), otherwise a host whose tab is hidden or whose stream stalled - the
+ * seats see what they are waiting on, and the host is told what to do about
+ * it.  A no-op when the play view is off screen.
+ */
 function drawRoomAlert() {
   const bar = document.getElementById('room-alert');
   if (!bar) return false;
-  const text = roomAlertText(state.room?.hostOutage);
+  const outage = roomAlertText(state.room?.hostOutage);
+  const self = !!state.room && state.room.host === state.me?.id;
+  const stream = outage ? null : hostStreamText(state.room?.hostStream, { self });
+  const text = outage || stream;
   bar.hidden = !text;
-  bar.replaceChildren(...(text ? [el('span', { class: 'icon', text: '⏳' }), el('span', { class: 'text', text })] : []));
+  bar.classList.toggle('stream', !outage && !!stream);
+  bar.replaceChildren(...(text ? [el('span', { class: 'icon', text: outage ? '⏳' : '⚠' }), el('span', { class: 'text', text })] : []));
   return !!text;
 }
 
 /**
- * Keep the banner in step with the room: draw it now, and tick the countdown
- * locally while the outage lasts - the room message carries the deadline, not
- * one message per second.  Leaving the play view removes the element, which
- * stops the tick on its next pass.
+ * The waiting room's start countdown, drawn from the room's own deadline.
+ *
+ * The server arms `autoStartAt` once the room can begin; this fills the card
+ * from it and ticks between room messages, so the number moves every second
+ * without the shell being rebuilt for each one.  No element (or no deadline)
+ * means there is nothing to show.
+ */
+function drawRoomCountdown() {
+  const box = document.getElementById('room-countdown');
+  if (!box) return false;
+  const room = state.room;
+  const until = Number(room?.autoStartAt) || 0;
+  const secs = until ? Math.max(0, Math.ceil((until - Date.now()) / 1000)) : 0;
+  const live = !!room && room.status === 'lobby' && secs > 0;
+  box.hidden = !live;
+  if (!live) return false;
+  const num = box.querySelector('.countdown-num');
+  if (num) num.textContent = String(secs);
+  const fill = box.querySelector('.countdown-fill');
+  if (fill) {
+    const total = Math.max(1000, Number(room.autoStartMs) || secs * 1000);
+    fill.style.width = `${Math.max(0, Math.min(100, Math.round((secs * 1000 / total) * 100)))}%`;
+  }
+  return true;
+}
+
+/**
+ * Keep both room banners in step with the room: draw them now, and tick locally
+ * while either lasts - the room message carries the deadline, not one message
+ * per second.  Leaving the play view removes the elements, which stops the tick
+ * on its next pass.
  */
 function syncRoomAlert() {
-  const live = drawRoomAlert();
-  if (live && !roomAlertTimer) roomAlertTimer = setInterval(drawRoomAlert, 500);
+  const alert = drawRoomAlert();
+  const countdown = drawRoomCountdown();
+  const live = alert || countdown;
+  if (live && !roomAlertTimer) roomAlertTimer = setInterval(() => { drawRoomAlert(); drawRoomCountdown(); }, 500);
   else if (!live && roomAlertTimer) {
     clearInterval(roomAlertTimer);
     roomAlertTimer = null;
@@ -568,11 +786,31 @@ function seatChip(p) {
   }, `${p.avatar || ''} ${p.name}${p.kind === 'bot' ? ' 🤖' : ''}${ghost ? ' · reconnecting…' : ''}`);
 }
 
+/** An unfilled seat: the hole the nudge buttons exist to fill. */
+function emptySeatChip() {
+  return el('span', { class: 'chip empty', text: 'open seat' });
+}
+
+/**
+ * The seat row for a room: filled seats, then an "open seat" placeholder for
+ * each unfilled one while the room is still waiting.  Seeing the holes is what
+ * makes "invite a friend / add a bot" the obvious next move.
+ */
+function seatChips(room) {
+  const chips = (room?.players || []).map(seatChip);
+  const max = Number(room?.game?.players?.max);
+  if (room?.status === 'lobby' && Number.isFinite(max)) {
+    const holes = Math.min(Math.max(0, max - chips.length), 8);
+    for (let i = 0; i < holes; i++) chips.push(emptySeatChip());
+  }
+  return chips;
+}
+
 /** Redraw the seat chips in place, so a mid-match drop ghosts its seat too. */
 function drawRoomSeats(room = state.room) {
   const box = document.getElementById('room-seats');
   if (!box) return false;
-  box.replaceChildren(...(room?.players || []).map(seatChip));
+  box.replaceChildren(...seatChips(room));
   return true;
 }
 
@@ -586,8 +824,23 @@ function drawRoomChat() {
   box.scrollTop = box.scrollHeight;
 }
 
+/**
+ * The per-game memory port an engine sees in render(): `seat` is the seat that
+ * belongs to this account (so a game records *your* result, not a hot-seat
+ * guest's), `get()` is the saved memory and `set()` writes it back through the
+ * settings sync.  Spectators get `seat: null` and therefore never write.
+ */
+function gameMemoryPort(gameId, seatId = null) {
+  return {
+    seat: seatId || null,
+    get: () => gameMemory(gameId),
+    set: (memory) => rememberGame(gameId, memory),
+  };
+}
+
 function mountLocalStage(stage, local) {
   if (!stage || !local?.engine) return;
+  const gameId = local.game.engine || local.game.id;
   const seats = seatsFor(local.game, {
     mode: local.mode,
     humans: local.humans,
@@ -601,15 +854,18 @@ function mountLocalStage(stage, local) {
     seats,
     options: local.options || {},
     role: local.mode,
+    // A solo run the player left half-played (only ever offered for a game whose
+    // engine declares `record.resume`); the host re-opens its exact state.
+    resume: local.mode === 'solo' ? local.resume : null,
+    // Hot-seat seats share one account's memory: only the first human seat (the
+    // one named after the signed-in player) is recorded.
+    memory: gameMemoryPort(gameId, seats.find((s) => s.kind === 'human')?.id || null),
     onEvent: (ev) => {
+      if (ev?.kind === 'record') return setRecordStrip(ev.memory, local.engine?.meta);
       if (ev?.text) toast(ev.text, ev.kind === 'win' ? 'good' : '', 2600);
     },
   });
   activeHost.render();
-  if (local.mode === 'local' && activeHost.humanSeats.length > 1) {
-    const bar = el('div', { class: 'row', style: { marginTop: '10px' } }, el('span', { class: 'muted small', text: 'Playing on one device - the active player is shown above. Pass the device when the turn changes.' }));
-    stage.appendChild(bar);
-  }
 }
 
 /** The online host is module-scoped so a re-render keeps the live match. */
@@ -667,6 +923,7 @@ function mountOnlineStage(stage = null) {
       playerId: state.me?.id,
       onEvent: (ev) => ev?.text && toast(ev.text),
       initialState: initial,
+      memory: gameMemoryPort(engineId, state.me?.id),
     });
     onlineHost.setEngine(engine);
     activeHost = onlineHost;
@@ -868,13 +1125,20 @@ rt.on('lobby', (msg) => {
   state.lobby = msg.rooms || [];
   state.lobbyStats = msg.stats || null;
   state.globalStats = msg.statsGlobal || state.globalStats;
-  if (state.view === 'lobby') renderApp();
-  else $('#status-counts').textContent = state.lobbyStats ? `${fmtNum(state.lobbyStats.online)} online · ${state.lobby.length} open rooms` : '';
+  // The servers screen redraws its own list in place, so a table appearing does
+  // not wipe the filters or a half-typed search; anywhere else only the counts
+  // move.  A stale hook (the view was left) clears itself and is ignored.
+  if (state.view === 'lobby' && typeof window.__redrawServers === 'function') window.__redrawServers();
+  renderStatus();
 });
 
 /** One-click actions for notifications that ask something of us: a party
  *  invite joins straight away, a friend request accepts in place. */
 function notifyActions(kind, msg) {
+  // A waiting-room invite from someone else's room: one tap puts us in it.
+  if (kind === 'room-invite' && msg.code && state.room?.code !== msg.code) {
+    return [{ label: '🎮 Join room', onClick: () => joinInvite(msg.code) }];
+  }
   if (kind === 'party-invite' && msg.code && state.party?.code !== msg.code) {
     return [{ label: '🎈 Join party', onClick: () => joinPartyInvite(msg.code) }];
   }
@@ -893,7 +1157,7 @@ function notifyActions(kind, msg) {
 
 rt.on('notify', (msg) => {
   const kind = msg.kind || 'info';
-  toast(msg.text || kind, kind === 'broadcast' ? 'warn' : 'good', 7000, notifyActions(kind, msg));
+  toast(msg.text || kind, kind === 'broadcast' || kind === 'host-stream' ? 'warn' : 'good', 7000, notifyActions(kind, msg));
   if (state.settings.notifications?.sounds !== false) sfx('notify');
   if (kind === 'friend-request' || kind === 'friend-accept') rt.send({ t: 'friend', op: 'list' });
   if (kind === 'report') refreshAdminBadge();

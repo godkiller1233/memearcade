@@ -85,6 +85,16 @@ export function makeSudoku(seed, difficulty = 'medium') {
 export const sudoku = {
   meta: {
     id: 'sudoku',
+    // A clean solve is worth 100 points, less five a mistake; a hinted finish is
+    // 80.  A grid takes a while, so the memory also keeps an unfinished one.
+    record: {
+      best: 'high',
+      label: 'points',
+      time: 'short',
+      timeLabel: 'fastest solve',
+      resume: true,
+      progress: (view) => `${Object.keys(view.myEntries || {}).length}/${view.totalToFill} squares · ${view.myMistakes} mistakes`,
+    },
     name: 'Sudoku',
     category: 'puzzle',
     players: { min: 1, max: 8 },

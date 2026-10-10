@@ -7,7 +7,12 @@
  *   online - the server owns state and streams per-player views
  *
  * A host exposes the small contract engines' render() expects:
- *   { role, uiState, refresh(), send(action), players, isHost }
+ *   { role, uiState, refresh(), send(action), players, isHost, memory }
+ *
+ * `memory` is the optional per-game memory port: { seat, get(), set(memory) }.
+ * An engine that should remember something between matches writes through it in
+ * its client-side code only - the authoritative server state stays pure (see
+ * gameMemoryPort in main.js and the games' own memory helpers).
  */
 import * as UI from '../games/engines/ui.js';
 import { SnapshotBuffer, Predictor, patchLocalSeat, netHudText, StreamClock, KeyframeGate, LinkSignal, scheduleFrame, cancelFrame } from './netcode.js';
@@ -17,6 +22,51 @@ import { rt, gameAction, netStats } from './realtime.js';
 import { sfx } from './audio.js';
 
 const BOT_NAMES = ['RoboRita', 'Bytey', 'NullPointer', 'Glitchy', 'Sir Lagsalot', 'PixelPete', 'MechaMango', 'Tofu', 'Clicky', 'VoidCat'];
+
+/** A stored counter that may be missing or junk, read as a number. */
+function memoryNum(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** How long an unfinished solo run waits before it is written to memory. */
+const PROGRESS_SAVE_MS = 12000;
+
+/**
+ * How much real time one stream wake may make up while the host tab is hidden.
+ * Hidden tabs get their timers clamped to about once a second, so the normal
+ * 200ms bank (right for a 60Hz-visible tab) would run the world at a fifth of
+ * real speed; this keeps it in step with the wall clock at that coarse cadence.
+ * A tab throttled to a wake a minute still crawls, but the room is told why.
+ */
+const BACKGROUND_CATCHUP_MS = 5000;
+
+/** Seconds as a clock the record line can show: 95 -> "1:35". */
+export function clockText(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  const mins = Math.floor(total / 60);
+  const rest = total % 60;
+  return mins ? `${mins}:${String(rest).padStart(2, '0')}` : `${rest}s`;
+}
+
+/** A game's own label for a saved run, never allowed to break the save. */
+function progressLabel(spec, view, state, seatId) {
+  try {
+    return String(spec.progress?.(view, state, seatId) ?? '').slice(0, 80);
+  } catch {
+    return '';
+  }
+}
+
+/** JSON a game state, or null when it cannot be one (a function slipped in). */
+function safeJson(value) {
+  try {
+    const json = JSON.stringify(value);
+    return typeof json === 'string' ? json : null;
+  } catch {
+    return null;
+  }
+}
 
 export function botSeat(index, level = 2, name = null) {
   return {
@@ -33,25 +83,38 @@ export function botSeat(index, level = 2, name = null) {
  * ------------------------------------------------------------------ */
 
 export class LocalHost {
-  constructor({ engine, mount, seats, options = {}, role = 'solo', onEvent = null }) {
+  constructor({ engine, mount, seats, options = {}, role = 'solo', onEvent = null, memory = null, resume = null }) {
     this.engine = engine;
     this.mount = mount;
     this.role = role; // 'solo' | 'local'
     this.uiState = {};
     this.onEvent = onEvent;
+    this.memory = memory;
     this.seats = seats;
-    this.state = engine.create({
-      players: seats,
-      options,
-      rng: Math.random,
-      seed: Math.floor(Math.random() * 1e9),
-      bots: seats.filter((s) => s.kind === 'bot').length,
-    });
+    // A run picked back up from memory (see record.resume in the engines): its
+    // saved state replaces a fresh create(), and the clock starts again from
+    // now - time spent away from the game is not time on the clock.
+    this.resume = resume && typeof resume === 'object' && resume.state ? resume : null;
+    this.state = this.resume
+      ? this.resume.state
+      : engine.create({
+        players: seats,
+        options,
+        rng: Math.random,
+        seed: Math.floor(Math.random() * 1e9),
+        bots: seats.filter((s) => s.kind === 'bot').length,
+      });
     this.manualSeat = null;
     this.botTimer = null;
+    this.progressTimer = null;
+    this.lastProgressJson = null;
     this.disposed = false;
     this.finished = false;
     this.startedAt = Date.now();
+    // One run books once, however many sessions it spans: a resumed run keeps
+    // the identity it was saved with.
+    this.runId = this.resume?.runId || `${this.state?.seed ?? 'x'}-${this.startedAt}`;
+    if (this.resume) this.lastProgressJson = safeJson(this.state);
   }
 
   /** Which seat is acting on this device right now. */
@@ -135,10 +198,133 @@ export class LocalHost {
     if (this.finished) return;
     this.finished = true;
     this.result = done;
+    clearTimeout(this.progressTimer);
+    this.progressTimer = null;
     const winners = (done.winners || []).map((id) => this.seats.find((s) => s.id === id)?.name).filter(Boolean);
     sfx(winners.length ? 'win' : 'lose');
-    this.onEvent?.({ text: done.summary || (winners.length ? `${winners.join(' & ')} win!` : 'Game over'), kind: 'win' });
+    // Book the record first so the news can carry it.
+    const booked = this.bookRun(done);
+    const note = booked?.notes?.length ? ` · ${booked.notes[0]}` : '';
+    this.onEvent?.({ text: `${done.summary || (winners.length ? `${winners.join(' & ')} win!` : 'Game over')}${note}`, kind: 'win' });
+    if (booked) this.onEvent?.({ kind: 'record', memory: booked.record });
     this.render();
+  }
+
+  /**
+   * Write the finished run into the account's memory for this game - the high
+   * score, the best time, the runs played - so a reload (or the desktop client,
+   * or the bot) still knows about it.
+   *
+   * Only games that say what a good run looks like keep a record (`meta.record`,
+   * see the engines): an arcade score and a puzzle time mean something, while a
+   * two-player board game already has its win column.  A game that books itself
+   * (smash keeps a whole career) declares `self` and is left alone here.
+   *
+   * Returns `{ record, notes }` - the notes are the record broken, ready to ride
+   * the end-of-game toast ("new best 1,240 points").
+   */
+  bookRun(done) {
+    const port = this.memory;
+    const spec = this.engine?.meta?.record;
+    if (!port || typeof port.set !== 'function' || !spec || spec.self === true || spec === false) return null;
+    // The seat this account owns: a hot-seat guest's run is not your record.
+    const seat = port.seat || this.seats.find((s) => s.kind !== 'bot')?.id || null;
+    if (!seat || !this.seats.some((s) => s.id === seat)) return null;
+    const previous = port.get() || {};
+    // One run books once, however many sessions it spans and however many times
+    // the finish is redrawn.
+    if (previous.lastRun === this.runId) return null;
+    const score = Number(done?.scores?.[seat] ?? this.state?.scores?.[seat] ?? 0) || 0;
+    const won = (done?.winners || []).includes(seat);
+    const seconds = Math.max(1, Math.round((Date.now() - this.startedAt) / 1000));
+    const label = spec.label || 'points';
+    const notes = [];
+    const record = {
+      ...previous,
+      played: memoryNum(previous.played) + 1,
+      wins: memoryNum(previous.wins) + (won ? 1 : 0),
+      lastScore: score,
+      lastSummary: String(done?.summary || '').slice(0, 160),
+      lastAt: Date.now(),
+      lastRun: this.runId,
+      // The run is over: retire the saved state so the game never offers to
+      // resume a finished one.  The tombstone is an empty string because that
+      // is the one value the settings merge replaces outright.
+      progress: { json: '', runId: this.runId, doneAt: Date.now() },
+    };
+    const hadBest = previous.bestScore !== undefined && previous.bestScore !== null;
+    if (spec.best === 'low' || spec.best) {
+      const best = hadBest ? memoryNum(previous.bestScore) : null;
+      const low = spec.best === 'low';
+      const beaten = best === null || (low ? score < best : score > best);
+      if (beaten) notes.push(`${best === null ? 'best' : 'new best'} ${score} ${label}`);
+      record.bestScore = best === null ? score : low ? Math.min(best, score) : Math.max(best, score);
+    }
+    // A clock only counts on a lane nobody else steers: solo (bots included) or
+    // a single seat.  A hot-seat guest's pace - or a race you lost - is not your
+    // best time.
+    const soloLane = this.role === 'solo' || this.seats.length === 1 || this.seats.every((s) => s.kind !== 'bot');
+    if (spec.time && soloLane && (won || this.seats.length === 1)) {
+      const hadTime = previous.bestTime !== undefined && previous.bestTime !== null;
+      const best = hadTime ? memoryNum(previous.bestTime) : null;
+      if (spec.time === 'long') {
+        if (best === null || seconds > best) notes.push(`${spec.timeLabel || 'longest run'} ${clockText(seconds)}`);
+        record.bestTime = Math.max(best ?? 0, seconds);
+      } else {
+        if (best === null || seconds < best) notes.push(`${best === null ? 'best' : 'new best'} time ${clockText(seconds)}`);
+        record.bestTime = best === null ? seconds : Math.min(best, seconds);
+      }
+    }
+    port.set(record);
+    return { record, notes };
+  }
+
+  /**
+   * Arm the ride-along save for a long solo run.  A spent timer re-arms from the
+   * next repaint, so an active game checkpoints every PROGRESS_SAVE_MS while an
+   * idle one is left alone - the engine only paints when something happened.
+   */
+  armProgressSave() {
+    if (this.progressTimer || this.disposed || this.finished) return;
+    if (!this.engine?.meta?.record?.resume || this.role !== 'solo') return;
+    this.progressTimer = setTimeout(() => {
+      this.progressTimer = null;
+      this.saveProgress();
+    }, PROGRESS_SAVE_MS);
+  }
+
+  /**
+   * Park the unfinished run in memory so a reload can pick it up.
+   *
+   * Only for a game that asked for it (`meta.record.resume`), only on the
+   * account's own seat, and never for a finished or hot-seat run.  The state
+   * rides as a string so the settings merge can both replace and clear it (see
+   * gameProgress in store.js).
+   */
+  saveProgress({ force = false } = {}) {
+    const port = this.memory;
+    const spec = this.engine?.meta?.record;
+    if (!port || typeof port.set !== 'function' || !spec?.resume) return null;
+    if (this.role !== 'solo' || this.finished) return null;
+    if (this.disposed && !force) return null;
+    const seat = port.seat || this.seats.find((s) => s.kind !== 'bot')?.id || null;
+    if (!seat) return null;
+    const json = safeJson(this.state);
+    // Nothing moved since the last checkpoint: leave the account alone.
+    if (!json || json === this.lastProgressJson) return null;
+    this.lastProgressJson = json;
+    const previous = port.get() || {};
+    port.set({
+      ...previous,
+      progress: {
+        json,
+        label: progressLabel(spec, this.rawView(seat), this.state, seat),
+        startedAt: this.startedAt,
+        runId: this.runId,
+        savedAt: Date.now(),
+      },
+    });
+    return true;
   }
 
   refresh() {
@@ -171,6 +357,7 @@ export class LocalHost {
       this.mount.appendChild(UI.h('div', { class: 'card', text: `This game failed to draw: ${err.message}` }));
     }
     this.maybeFinished();
+    this.armProgressSave();
   }
 
   maybeFinished() {
@@ -179,8 +366,13 @@ export class LocalHost {
   }
 
   dispose() {
+    // Leaving the game is the checkpoint that matters: park the run before the
+    // host goes away, then stop everything.
+    this.saveProgress({ force: true });
     this.disposed = true;
     clearTimeout(this.botTimer);
+    clearTimeout(this.progressTimer);
+    this.progressTimer = null;
     const node = this.mount?.firstElementChild;
     if (node) UI.cleanupTree(node);
   }
@@ -206,13 +398,14 @@ export class LocalHost {
 const KEYFRAME_COOLDOWN = 1000;
 
 export class OnlineHost {
-  constructor({ mount, room, view, playerId, onEvent = null, initialState = null }) {
+  constructor({ mount, room, view, playerId, onEvent = null, initialState = null, memory = null }) {
     this.mount = mount;
     this.room = room;
     this.view_ = view;
     this.state = null;
     this.playerId = playerId;
     this.uiState = {};
+    this.memory = memory;
     this.role = room.status === 'playing' ? (room.players.some((p) => p.id === playerId) ? 'online' : 'spectator') : 'lobby';
     this.onEvent = onEvent;
     this.engine = null;
@@ -238,6 +431,14 @@ export class OnlineHost {
     this.netEl = null;
     this.netHudAt = 0;
     this.sentAt = [];
+    // The host tab's own visibility: a hidden tab keeps streaming, but the
+    // browser clamps its timers, so the world switches to a coarser catch-up
+    // and the room is told why frames got choppier (see handleVisibility).
+    this.hidden = false;
+    this.hiddenAt = 0;
+    this.titleRestore = null;
+    this.onVisibility = () => this.handleVisibility();
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', this.onVisibility);
     if (initialState) this.state = initialState;
   }
 
@@ -450,6 +651,58 @@ export class OnlineHost {
     return span > 0 ? ((times.length - 1) * 1000) / span : 0;
   }
 
+  /* ---------------- host tab visibility ---------------- */
+
+  /**
+   * What happens when the host tab hides or comes back.
+   *
+   * The host is the room's only source of world state, and every browser
+   * throttles timers in hidden tabs - Chrome clamps them to about once a second
+   * and, after five minutes, to once a minute.  Nothing can stop that, so the
+   * room does the next best thing: it keeps streaming at the cadence the
+   * browser still allows, tells the room why the frames got choppier, and, when
+   * the host comes back, tells them what happened while they were away.  The
+   * tab title carries the same warning for anyone scanning their tab strip.
+   */
+  handleVisibility() {
+    if (this.disposed || typeof document === 'undefined') return;
+    const hidden = document.visibilityState === 'hidden';
+    if (hidden === this.hidden) return;
+    this.hidden = hidden;
+    const hosting = this.isHost && this.room?.status === 'playing' && !!this.engine?.meta?.realtime;
+    // The server mirrors this in the room's banner, so the other seats know
+    // they are waiting on a background tab rather than on a broken game.
+    if (hosting) rt.send({ t: 'room', op: 'visibility', hidden });
+    if (hidden) {
+      if (!hosting) return;
+      this.hiddenAt = Date.now();
+      this.markTitle();
+      return;
+    }
+    if (!this.hiddenAt) return;
+    const away = Date.now() - this.hiddenAt;
+    this.hiddenAt = 0;
+    this.restoreTitle();
+    this.redraw?.();
+    // A blink out and back is not worth a notice; a real absence is.
+    if (hosting && away > 5000) {
+      toast(`Your tab was in the background for ${clockText(away / 1000)} — the room kept streaming at a reduced rate. Keep this tab visible for smooth play.`, 'warn', 9000);
+    }
+  }
+
+  /** While the host tab is hidden, the tab itself carries the warning. */
+  markTitle() {
+    if (typeof document === 'undefined' || this.titleRestore !== null) return;
+    this.titleRestore = document.title;
+    document.title = `⚠ ${document.title}`;
+  }
+
+  restoreTitle() {
+    if (typeof document === 'undefined' || this.titleRestore === null) return;
+    document.title = this.titleRestore;
+    this.titleRestore = null;
+  }
+
   /* ---------------- realtime streaming (host only) ---------------- */
 
   startStream() {
@@ -505,10 +758,13 @@ export class OnlineHost {
    * Advance the authoritative world to `now` in fixed 1/60s slices.  A slow
    * timer changes how many slices a wake runs, not their size, and the bank is
    * capped (see StreamClock) so a long stall warps the world by at most 200ms
-   * instead of replaying the whole pause.
+   * instead of replaying the whole pause.  A hidden tab is the one exception:
+   * its timers are clamped to about a second, so the bank may hold that much
+   * real time and the world keeps step with the wall clock while the room keeps
+   * receiving snapshots on the same fixed grid.
    */
   stepWorld(now) {
-    const steps = this.clock.advance(now);
+    const steps = this.clock.advance(now, this.hidden ? BACKGROUND_CATCHUP_MS : this.clock.maxCatchup);
     if (steps <= 0) return true;
     const events = [];
     try {
@@ -524,7 +780,9 @@ export class OnlineHost {
     }
     for (const ev of events) if (ev.text) this.onEvent?.(ev);
     this.syncView();
-    this.redraw?.();
+    // Nothing is on screen while the tab is hidden: skip the repaint, and
+    // repaint once when the host comes back (see handleVisibility).
+    if (!this.hidden) this.redraw?.();
     return true;
   }
 
@@ -647,6 +905,8 @@ export class OnlineHost {
 
   dispose() {
     this.disposed = true;
+    if (typeof document !== 'undefined' && this.onVisibility) document.removeEventListener('visibilitychange', this.onVisibility);
+    this.restoreTitle();
     this.stopStream();
     this.stopFrames();
     this.buffer = null;

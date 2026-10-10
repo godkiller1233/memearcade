@@ -20,14 +20,18 @@ const DRAW_MODES = MODES;
  * shared helpers
  * ------------------------------------------------------------------ */
 
+/**
+ * Normalise whatever a client sent into storable strokes.
+ *
+ * Points go through UI.pointXY, so a pair, a {x, y} object or garbage all land
+ * as a clamped 0..1 pair instead of silently collapsing to a 0,0 dot.
+ */
 export function cleanStrokes(strokes, maxStrokes = 260, maxPoints = 900) {
   if (!Array.isArray(strokes)) return [];
   const out = [];
   for (const stroke of strokes.slice(0, maxStrokes)) {
     if (!stroke || !Array.isArray(stroke.pts)) continue;
-    const pts = stroke.pts
-      .slice(0, maxPoints)
-      .map((p) => [U.clamp(Number(p?.[0]) || 0, 0, 1), U.clamp(Number(p?.[1]) || 0, 0, 1)]);
+    const pts = stroke.pts.slice(0, maxPoints).map(UI.pointXY);
     if (!pts.length) continue;
     out.push({ color: String(stroke.color || '#111827').slice(0, 16), width: U.clamp(Number(stroke.width) || 5, 1, 40), pts });
   }
@@ -36,6 +40,24 @@ export function cleanStrokes(strokes, maxStrokes = 260, maxPoints = 900) {
 
 export function strokeCount(strokes) {
   return (strokes || []).reduce((n, s) => n + (s.pts?.length || 0), 0);
+}
+
+/**
+ * The strokes of the pad in `host.uiState`, scoped to one seat of one round.
+ *
+ * A pad is rebuilt on every re-render while `uiState` lives for the whole
+ * session, so without the key the next player of a hot-seat round opened a
+ * canvas already full of the previous player's drawing - and submitted it as
+ * their own on top.  Changing the key (or a rematch, which keys on a new seed)
+ * starts them on an empty page.
+ */
+function padStrokes(ui, view, playerId, what) {
+  const key = `${view.seed ?? 0}:${what}:${view.roundIndex ?? view.round ?? 0}:${playerId}`;
+  if (ui.padKey !== key) {
+    ui.padKey = key;
+    ui.strokes = [];
+  }
+  return ui.strokes || (ui.strokes = []);
 }
 
 const PROMPTS = [
@@ -145,6 +167,7 @@ export const garticPhone = {
     const v = U.baseView(state, viewerId);
     const myIndex = state.players.findIndex((p) => p.id === viewerId);
     v.presetId = state.presetId;
+    v.seed = state.seed;
     v.phase = state.phase;
     v.roundIndex = state.roundIndex;
     v.chainRounds = state.chainRounds;
@@ -159,6 +182,10 @@ export const garticPhone = {
     if (state.phase === 'reveal') {
       v.books = state.books;
       v.creatures = state.corpse.creatures;
+      // The reveal is the end of the chain: without these the phase bar reads
+      // "NaN/undefined" over the finished books.
+      v.roundsTotal = state.preset.corpse ? CORPSE_SLOTS.length : state.chainRounds.length;
+      v.roundsDone = v.roundsTotal;
       v.spectator = false;
       v.turn = state.players.filter((p) => !(state.readyForNext || []).includes(p.id)).map((p) => p.id);
       v.myTurn = v.turn.includes(viewerId);
@@ -374,7 +401,7 @@ export const garticPhone = {
           style: { left: `${guide.x * 100}%`, top: `${guide.y * 100}%`, width: `${guide.w * 100}%`, height: `${guide.h * 100}%` },
         }),
         UI.drawingPad({
-          strokes: ui.strokes || (ui.strokes = []),
+          strokes: padStrokes(ui, view, playerId, 'corpse'),
           height: 380,
           color: ui.color || '#111827',
           width: ui.width || 6,
@@ -415,7 +442,7 @@ export const garticPhone = {
       if (view.submitted) {
         el.appendChild(UI.spinnerRow('Drawing sent - waiting for the others...'));
       } else {
-        el.appendChild(UI.drawingPad({ strokes: ui.strokes || (ui.strokes = []), height: 340, color: ui.color || '#111827', width: ui.width || 6 }).el);
+        el.appendChild(UI.drawingPad({ strokes: padStrokes(ui, view, playerId, 'draw'), height: 340, color: ui.color || '#111827', width: ui.width || 6 }).el);
         el.appendChild(UI.paletteRow((c) => { ui.color = c; host?.refresh?.(); }, ui.color || '#111827'));
         el.appendChild(UI.widthPicker((w) => { ui.width = w; host?.refresh?.(); }, ui.width || 6));
         el.appendChild(UI.row(
@@ -678,6 +705,7 @@ export const charadesDraw = {
     const isArtist = state.artistId === viewerId;
     v.round = state.round;
     v.maxRounds = state.maxRounds;
+    v.seed = state.seed;
     v.artistId = state.artistId;
     v.artistName = U.byId(state, state.artistId)?.name || '???';
     v.strokes = state.strokes;
@@ -825,7 +853,7 @@ export const charadesDraw = {
     if (isArtist) {
       el.appendChild(UI.promptCard(`Draw: ${view.word}`, 'Strokes stream to the room as you draw.'));
       el.appendChild(UI.drawingPad({
-        strokes: ui.strokes || (ui.strokes = []),
+        strokes: padStrokes(ui, view, playerId, 'artist'),
         height: 340,
         color: ui.color || '#111827',
         width: ui.width || 6,
@@ -971,6 +999,7 @@ export const badDrawing = {
     const v = U.baseView(state, viewerId);
     v.round = state.round;
     v.maxRounds = state.maxRounds;
+    v.seed = state.seed;
     v.votePoints = state.votePoints;
     v.prompt = state.prompt;
     v.myStrokes = state.strokes[viewerId] || [];
@@ -1101,7 +1130,7 @@ export const badDrawing = {
         el.appendChild(UI.spinnerRow('Drawing locked in - waiting for the others...'));
       } else {
         const pad = UI.drawingPad({
-          strokes: ui.strokes || (ui.strokes = []),
+          strokes: padStrokes(ui, view, playerId, 'bad'),
           height: 360,
           color: ui.color || SABOTAGE_COLORS[0],
           width: ui.width || 6,

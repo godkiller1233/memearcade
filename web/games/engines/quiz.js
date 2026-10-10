@@ -197,6 +197,8 @@ function triviaScore(state, playerId, orderIndex) {
 export const trivia = {
   meta: {
     id: 'trivia',
+    // Correct answers, faster answers worth more.
+    record: { best: 'high', label: 'points' },
     name: 'Trivia',
     category: 'quiz',
     players: { min: 1, max: 16 },
@@ -358,6 +360,8 @@ const RUSH_MODES = {
 export const quizRush = {
   meta: {
     id: 'quiz-rush',
+    // The mode decides the currency (points, coins, lives) but all score up.
+    record: { best: 'high', label: 'points' },
     name: 'Quiz Rush',
     category: 'quiz',
     players: { min: 1, max: 16 },
@@ -590,6 +594,8 @@ const JEOPARDY_VALUES = [200, 400, 600, 800];
 export const jeopardy = {
   meta: {
     id: 'jeopardy',
+    // Board values won, less anything a wrong answer cost you.
+    record: { best: 'high', label: 'points' },
     name: 'Jeopardy',
     category: 'quiz',
     players: { min: 1, max: 8 },
@@ -815,6 +821,8 @@ const CLUE_POINTS = [10, 7, 4, 2];
 export const guessCharacter = {
   meta: {
     id: 'guess-character',
+    // Earlier clues are worth more, so this is a points race like trivia.
+    record: { best: 'high', label: 'points' },
     name: 'Guess the Character',
     category: 'quiz',
     players: { min: 1, max: 12 },
@@ -950,6 +958,8 @@ function resolveCharacter(state, events) {
 export const guessThePrompt = {
   meta: {
     id: 'guess-the-prompt',
+    // Keyword hits across every image in the run.
+    record: { best: 'high', label: 'points' },
     name: 'Prompt Guessing',
     category: 'puzzle',
     players: { min: 1, max: 12 },

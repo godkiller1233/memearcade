@@ -71,6 +71,12 @@ export const config = {
   /** How long a disconnected room seat (or viewer) is kept before cleanup. */
   roomGraceMs: num(env.MEMES_ROOM_GRACE_MS, 20000),
   /**
+   * How long a ready waiting room shows "starting in N…" before it starts
+   * itself.  The floor keeps a bad value from dropping players into a match
+   * before the room has drawn.
+   */
+  autoStartMs: Math.max(3000, num(env.MEMES_AUTO_START_MS, 15000)),
+  /**
    * How often the server checks whether a scheduled feature window opened or
    * closed and pushes the change to everybody online.  The floor keeps a bad
    * value from turning into a busy loop.

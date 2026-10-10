@@ -38,6 +38,15 @@ const DELAY_MARGIN = 30;
 /** How fast the adaptive delay may move per arriving snapshot, in ms. */
 const GROW_STEP = 12;
 const SHRINK_STEP = 4;
+/**
+ * How far a slow stream may stretch the delay past one arrival interval, and
+ * how much of the remaining distance it covers per arriving snapshot.  A host
+ * tab in the background streams about once a second; the tight 250ms bound is
+ * right for a 20/s stream and far too small for that one, so the ceiling has to
+ * follow the measured cadence.
+ */
+const SLOW_CEILING_FACTOR = 1.5;
+const GROW_FRACTION = 0.25;
 /** Two blended entities further apart than this are treated as different things. */
 const MATCH_RADIUS = 120;
 /** Corrections larger than this are respawns/teleports: snap instead of smearing. */
@@ -185,8 +194,19 @@ export class SnapshotBuffer {
     if (gaps.length < 4) return;
     const centre = median(gaps);
     const target = centre + MAD_FACTOR * deviation(gaps, centre) + DELAY_MARGIN;
-    const clamped = Math.max(this.minDelay, Math.min(this.maxDelay, target));
-    const step = clamped > this.delay ? GROW_STEP : SHRINK_STEP;
+    // The ceiling follows the cadence.  A calm 20/s stream stays under the
+    // usual 250ms bound, but a slowly-arriving one is allowed past its own
+    // interval: a host tab in the background watches timers clamp to about
+    // once a second, and holding the cursor 250ms behind snapshots that far
+    // apart would run the timeline dry on every single frame.
+    const ceiling = Math.max(this.maxDelay, centre * SLOW_CEILING_FACTOR + DELAY_MARGIN);
+    const clamped = Math.max(this.minDelay, Math.min(ceiling, target));
+    // A fast stream keeps the gentle 12ms-per-snapshot growth; a slow one
+    // covers a quarter of its arrival gap per snapshot, so a second-long
+    // cadence settles in a few seconds instead of a few minutes.
+    const step = clamped > this.delay
+      ? Math.max(GROW_STEP, Math.min(clamped - this.delay, centre * GROW_FRACTION))
+      : SHRINK_STEP;
     this.delay += Math.max(-step, Math.min(step, clamped - this.delay));
   }
 
@@ -307,6 +327,30 @@ export function roomAlertText(outage, nowMs = Date.now()) {
 }
 
 /**
+ * The room banner's line for a host whose tab is hidden or whose stream has
+ * stalled (`room.hostStream`).  A host-authoritative match cannot advance
+ * without its host, so the room says what it is waiting on instead of looking
+ * broken; the host's own build of the line tells them what to do about it.
+ * Returns null when the stream is healthy.  Pure string formatting - the node
+ * tooling and the banner share this.
+ */
+export function hostStreamText(stream, { self = false } = {}) {
+  if (!stream) return null;
+  const host = stream.hostName || 'The host';
+  if (stream.stalled) {
+    return self
+      ? 'Your tab stopped streaming — bring this match tab back to the foreground to keep the room moving.'
+      : `${host} stopped streaming — the match is waiting on their tab.`;
+  }
+  if (stream.hidden) {
+    return self
+      ? 'Your tab is in the background — the room keeps streaming, but frames may be choppier until you are back.'
+      : `${host} is hosting from a background tab — frames may be choppier until it is back.`;
+  }
+  return null;
+}
+
+/**
  * Turns a viewer's snapshot timeline into the recovery cue the readout shows.
  *
  * A frozen picture should read as "reconnecting", not as a broken game: while
@@ -372,10 +416,11 @@ export class StreamClock {
    * world owes.  A long stall banks at most `maxCatchup` ms, so the host warps
    * at most that far instead of replaying the whole pause.
    */
-  advance(now = 0) {
+  advance(now = 0, cap = this.maxCatchup) {
     const at = Number.isFinite(now) ? now : this.stepAt;
-    const elapsed = Math.min(Math.max(0, at - this.stepAt), this.maxCatchup);
-    this.acc = Math.min(this.acc + elapsed, this.maxCatchup);
+    const limit = Number.isFinite(cap) && cap > 0 ? cap : this.maxCatchup;
+    const elapsed = Math.min(Math.max(0, at - this.stepAt), limit);
+    this.acc = Math.min(this.acc + elapsed, limit);
     this.stepAt = at;
     const steps = Math.floor(this.acc / this.step);
     this.acc = Math.max(0, this.acc - steps * this.step);
@@ -633,6 +678,7 @@ export default {
   patchLocalSeat,
   seatEntity,
   netHudText,
+  hostStreamText,
   scheduleFrame,
   cancelFrame,
 };

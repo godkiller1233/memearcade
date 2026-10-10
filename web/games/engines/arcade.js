@@ -133,6 +133,9 @@ const BALL_R = 7;
 export const pong = {
   meta: {
     id: 'pong',
+    // What a good run at this game looks like, for the account's per-game record
+    // (see bookRun in host.js): a pong "score" is the margin you won by.
+    record: { best: 'high', label: 'win margin' },
     name: 'Ping Pong',
     category: 'arcade',
     players: { min: 2, max: 4 },
@@ -444,6 +447,8 @@ const ALIEN_GAP = 14;
 export const invade = {
   meta: {
     id: 'invade',
+    // Wave points banked with the ship's guns; higher is better.
+    record: { best: 'high', label: 'points' },
     name: 'Invade',
     category: 'arcade',
     players: { min: 1, max: 4 },
@@ -801,6 +806,8 @@ const SHIP_HP = 100;
 export const rocketBotRoyale = {
   meta: {
     id: 'rocket-bot-royale',
+    // Kills and surviving hull, the same number the results screen ranks.
+    record: { best: 'high', label: 'points' },
     name: 'Rocket Bot Royale',
     category: 'arcade',
     players: { min: 2, max: 8 },
@@ -1195,6 +1202,16 @@ function resolveWall(ball, vel, [x1, y1, x2, y2]) {
 export const miniGolf = {
   meta: {
     id: 'mini-golf',
+    // Strokes: fewer is better, and the round is worth timing.  A round lasts
+    // fifteen minutes, so the memory keeps where the player left off (resume).
+    record: {
+      best: 'low',
+      label: 'strokes',
+      time: 'short',
+      timeLabel: 'fastest round',
+      resume: true,
+      progress: (view, state, seatId) => `Hole ${view.holeNumber}/${view.holes} · ${view.strokes?.[seatId] ?? 0} strokes`,
+    },
     name: 'Mini Golf',
     category: 'arcade',
     players: { min: 1, max: 8 },
@@ -1393,6 +1410,10 @@ function advanceGolf(state, events) {
       scores: Object.fromEntries(state.players.map((p) => [p.id, -state.strokes[p.id]])),
     });
     state.winnerId = ranked.filter((r) => r.score === ranked[0].score).map((r) => r.id);
+    // The round's real score, in the positive: total strokes, fewest wins.  The
+    // ranking above negates only to sort the winners; this is the number the
+    // arcade's per-game record books (meta.record.best === 'low').
+    state.scores = Object.fromEntries(state.players.map((p) => [p.id, state.strokes[p.id] || 0]));
     state.summary = `${ranked[0].name} wins the round with ${state.strokes[ranked[0].id]} strokes!`;
     events.push(U.event(state.summary, 'win'));
     return;

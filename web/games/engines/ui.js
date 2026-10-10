@@ -196,12 +196,21 @@ export function inputRow(placeholder, onSubmit, { submitLabel = 'Send', maxLengt
 
 export function textareaRow(placeholder, onSubmit, { submitLabel = 'Submit', maxLength = 400, rows = 3 } = {}) {
   const area = h('textarea', { class: 'input area', placeholder, maxLength, rows });
-  return h('div', { class: 'input-row col' }, area, btn(submitLabel, () => {
+  const submit = () => {
     const text = area.value.trim();
     if (!text) return;
     area.disabled = true;
     onSubmit(text);
-  }, { variant: 'primary' }));
+  };
+  // Enter sends, Shift+Enter keeps the newline - typing a prompt and reaching
+  // for the mouse is the one place a party game should never make you go.
+  area.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' && !ev.shiftKey) {
+      ev.preventDefault();
+      submit();
+    }
+  });
+  return h('div', { class: 'input-row col' }, area, btn(submitLabel, submit, { variant: 'primary' }));
 }
 
 /* -------------------------------- scoreboard ------------------------------- */
@@ -507,14 +516,20 @@ export function drawingPad({
   let live = null;
   let drawing = false;
 
+  // Points are `[x, y]` pairs - the same shape the bots, the reveal and the
+  // wire format speak.  A `{x, y}` object here used to reach drawStrokes, which
+  // destructures pairs, so every human stroke threw mid-redraw (nothing painted)
+  // and submitted as a 0,0 dot (nothing stored): drawings vanished for good.
   const toLocal = (ev) => {
     const rect = canvas.getBoundingClientRect();
     const clientX = ev.touches ? ev.touches[0].clientX : ev.clientX;
     const clientY = ev.touches ? ev.touches[0].clientY : ev.clientY;
-    return {
-      x: clamp((clientX - rect.left) / rect.width, 0, 1),
-      y: clamp((clientY - rect.top) / rect.height, 0, 1),
-    };
+    const w = rect.width || canvas.clientWidth || 1;
+    const hh = rect.height || canvas.clientHeight || 1;
+    return [
+      clamp((clientX - rect.left) / w, 0, 1),
+      clamp((clientY - rect.top) / hh, 0, 1),
+    ];
   };
 
   const start = (ev) => {
@@ -529,10 +544,10 @@ export function drawingPad({
     ev.preventDefault();
     const p = toLocal(ev);
     const last = live[live.length - 1];
-    if (last && Math.hypot(p.x - last.x, p.y - last.y) < 0.004) return;
+    if (last && Math.hypot(p[0] - last[0], p[1] - last[1]) < 0.004) return;
     if (wobble) {
-      p.x = clamp(p.x + (Math.random() - 0.5) * wobble, 0, 1);
-      p.y = clamp(p.y + (Math.random() - 0.5) * wobble, 0, 1);
+      p[0] = clamp(p[0] + (Math.random() - 0.5) * wobble, 0, 1);
+      p[1] = clamp(p[1] + (Math.random() - 0.5) * wobble, 0, 1);
     }
     live.push(p);
     if (onStroke) onStroke(live);
@@ -590,13 +605,19 @@ export function drawingPad({
  * (so nothing is invented) while turning the capture into a drawn-looking
  * curve; the ends still get a round cap and a single tap still becomes a dot.
  */
+export function pointXY(p) {
+  const x = Array.isArray(p) ? p[0] : p?.x;
+  const y = Array.isArray(p) ? p[1] : p?.y;
+  return [clamp(Number(x) || 0, 0, 1), clamp(Number(y) || 0, 0, 1)];
+}
+
 export function drawStrokes(ctx, strokes, w, h) {
   ctx.save();
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
   for (const stroke of strokes) {
     if (!stroke?.pts?.length) continue;
-    const pts = stroke.pts.map(([x, y]) => [x * w, y * h]);
+    const pts = stroke.pts.map(pointXY).map(([x, y]) => [x * w, y * h]);
     const lineWidth = (stroke.width || 5) * Math.min(w, h) / 420;
     ctx.strokeStyle = stroke.color || '#111827';
     ctx.lineWidth = lineWidth;

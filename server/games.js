@@ -25,6 +25,12 @@ const SKIP_FILES = new Set(['index.js', 'util.js', 'ui.js', 'shared.js']);
 const OPTIONAL = {};
 /** Shortest gap between keyframe requests relayed from one realtime seat. */
 const KEYFRAME_FLOOR_MS = 750;
+/**
+ * How long a realtime room waits on its host's stream before it says so.  A
+ * hidden tab streams about once a second (browsers clamp its timers), so the
+ * gap has to clear that cadence with room to spare before it counts as stalled.
+ */
+const STREAM_STALL_MS = 3500;
 
 /** Load every engine module from disk. Safe to call more than once. */
 export async function loadEngines() {
@@ -77,6 +83,27 @@ export function engineCatalog() {
     });
   }
   return out;
+}
+
+/**
+ * A finished match as its engine wants it remembered (see `meta.review`).
+ *
+ * The hook is optional and engine-owned: chess returns colours, plies,
+ * captures, the opening and the end reason, and a game without one simply keeps
+ * the summary.  A broken hook must never cost the arcade a finished match, so
+ * it is called defensively - the same trust level as the result itself, which
+ * the host streams.
+ */
+function matchReview(room, result) {
+  try {
+    const hook = room.engine?.meta?.review;
+    if (typeof hook !== 'function' || !room.state) return null;
+    const review = hook(room.state, result);
+    return review && typeof review === 'object' ? review : null;
+  } catch (err) {
+    log(`games: review() failed for ${room.gameId}:`, err.message);
+    return null;
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -142,6 +169,14 @@ export class GameRooms {
       botTimer: 0,
       result: null,
       snapshots: [],
+      // Host stream health for the live-room warnings (see watchHostStream):
+      // when the host's last snapshot landed, whether the room has already been
+      // told the stream stalled, and whether the host reports a hidden tab.
+      streamAt: 0,
+      streamWarned: false,
+      streamWarnedAt: 0,
+      hostHidden: false,
+      hostHiddenAt: 0,
     };
     this.rooms.set(id, room);
     if (host) this.addPlayer(room, host);
@@ -254,6 +289,79 @@ export class GameRooms {
     };
   }
 
+  /**
+   * What the room should say about its host's stream, or null when there is
+   * nothing to say.  A host-authoritative match cannot advance without its
+   * host, so a hidden tab or a stalled stream is room news, not a private
+   * problem: it rides along in roomInfo and each client's banner reads it.
+   */
+  hostStreamInfo(room) {
+    if (!room || room.status !== 'playing' || !room.engine?.meta?.realtime) return null;
+    if (!room.hostHidden && !room.streamWarned) return null;
+    const host = room.players.find((p) => p.id === room.host);
+    return {
+      hidden: !!room.hostHidden,
+      stalled: !!room.streamWarned,
+      hostName: host?.name || null,
+      since: room.streamWarnedAt || room.hostHiddenAt || 0,
+    };
+  }
+
+  /** The host's tab reported hiding or coming back; true when it changed. */
+  noteHostVisibility(room, hidden) {
+    const next = !!hidden;
+    if (room.hostHidden === next) return false;
+    room.hostHidden = next;
+    room.hostHiddenAt = next ? now() : 0;
+    return true;
+  }
+
+  /**
+   * A host snapshot landed: the stream is healthy again.  If the room had been
+   * told it stalled, it is told it recovered too - the roster banner clears on
+   * either message, and the chat says why it went quiet.
+   */
+  noteHostSnapshot(room) {
+    room.streamAt = now();
+    if (!room.streamWarned) return;
+    room.streamWarned = false;
+    room.streamWarnedAt = 0;
+    const host = room.players.find((p) => p.id === room.host);
+    this.systemMessage(room, `▶️ ${host?.name || 'The host'}'s tab is streaming again.`);
+    this.broadcast(room);
+  }
+
+  /**
+   * The host stream watchdog, run from tickAll.  Nothing can stop a browser
+   * from throttling a hidden tab's timers, so the room's job is to notice and
+   * say so: the host is told to bring their tab back, and everyone else hears
+   * why the match stopped moving instead of being left to guess.
+   */
+  watchHostStream(room, t = now()) {
+    if (!room.engine?.meta?.realtime || !room.host || room.hostOutageUntil) return;
+    if (!room.streamAt) {
+      room.streamAt = t; // the match just started: the first snapshot is due
+      return;
+    }
+    if (t - room.streamAt <= STREAM_STALL_MS || room.streamWarned) return;
+    room.streamWarned = true;
+    room.streamWarnedAt = t;
+    const host = room.players.find((p) => p.id === room.host);
+    const name = host?.name || 'The host';
+    this.systemMessage(room, `⏳ ${name} stopped streaming — the match is waiting on their tab.`);
+    if (host?.kind === 'human') {
+      this.hub?.sendToUser(room.host, {
+        t: 'notify',
+        kind: 'host-stream',
+        text: 'Your tab stopped streaming — the match is waiting on it. Bring this tab back to the foreground.',
+        at: now(),
+        roomId: room.id,
+        code: room.code,
+      });
+    }
+    this.broadcast(room);
+  }
+
   addSpectator(room, user) {
     if (!room.spectators.some((s) => s.id === user.id)) {
       room.spectators.push({ id: user.id, name: user.name, avatar: user.avatar || '👀' });
@@ -275,6 +383,9 @@ export class GameRooms {
       throw new Error(`Needs ${meta.players.min}-${meta.players.max} players (currently ${room.players.length}).`);
     }
     room.seed = (room.seed + 1) >>> 0;
+    // The countdown is spent: the match is here, and a stale deadline must not
+    // leak into a finished room's info.
+    room.autoStartAt = 0;
     const state = room.engine.create({
       players: room.players.map((p) => ({ ...p })),
       options: room.options,
@@ -286,6 +397,12 @@ export class GameRooms {
     room.status = 'playing';
     room.result = null;
     room.startedAt = now();
+    // The host stream watchdog starts here: if the host's first snapshot never
+    // arrives, the room learns that within the stall window (see
+    // watchHostStream) instead of waiting forever.
+    room.streamAt = now();
+    room.streamWarned = false;
+    room.streamWarnedAt = 0;
     room.deadline = meta.turnMs ? now() + meta.turnMs : 0;
     this.systemMessage(room, `Game started: ${meta.name}`);
     // Realtime rooms are host-authoritative: the host needs the pristine
@@ -304,14 +421,47 @@ export class GameRooms {
     room.result = result;
     room.finishedAt = now();
     const humans = room.players.filter((p) => p.kind === 'human');
-    // The engine's own result carries the per-player points (see over()).
-    recordGame(room.gameId, humans, { roomId: room.id, winners: result?.winners || [], scores: result?.scores });
+    // The engine's own result carries the per-player points (see over()), and
+    // its optional review carries what a replay would ask about - chess keeps
+    // colours, plies, captures, the opening and how the game ended.
+    recordGame(room.gameId, humans, {
+      roomId: room.id,
+      winners: result?.winners || [],
+      scores: result?.scores,
+      summary: result?.summary || null,
+      review: matchReview(room, result),
+    });
     const winners = (result?.winners || []).map((id) => room.players.find((p) => p.id === id)?.name).filter(Boolean);
     this.systemMessage(
       room,
       winners.length ? `🏆 ${winners.join(', ')} win${winners.length > 1 ? '' : 's'}!` : 'Game over - no winner.',
     );
     this.touch(room);
+  }
+
+  /**
+   * The waiting-room countdown.
+   *
+   * A room starts itself only once it *can* start and at least one other seat
+   * has turned up: a table sitting at one player is the dead air the nudge
+   * buttons are for, not something to force into a solo match, and a game whose
+   * minimum is one player still waits for company.  The state is recomputed on
+   * every tick, so it needs no hook in every membership change - it arms the
+   * moment the room is ready, disarms the moment it is not, and fires once.
+   * Returns true when the countdown moved, so the tick can broadcast it.
+   */
+  syncCountdown(room) {
+    const ready = room.status === 'lobby' && this.canStart(room) && room.players.length >= 2;
+    if (!ready) {
+      if (!room.autoStartAt) return false;
+      room.autoStartAt = 0;
+      return true;
+    }
+    if (!room.autoStartAt) {
+      room.autoStartAt = now() + config.autoStartMs;
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -336,6 +486,7 @@ export class GameRooms {
   close(room, reason = 'closed') {
     room.status = 'closed';
     room.hostOutageUntil = 0;
+    room.autoStartAt = 0;
     room.closedAt = now();
     room.closeReason = reason;
     this.rooms.delete(room.id);
@@ -370,6 +521,8 @@ export class GameRooms {
         room.state = action.snapshot ?? room.state;
         room.updatedAt = now();
         room.lastActivity = now();
+        // The stream is the room's heartbeat: a snapshot clears any stall.
+        this.noteHostSnapshot(room);
         // Everyone but the host: it just sent this snapshot.
         this.emit(room, { t: 'tick', snapshot: room.state }, { except: [playerId] });
         // A streamed snapshot can be a finished match - close the room for it.
@@ -386,11 +539,19 @@ export class GameRooms {
       if (action.type === 'input' && playerId !== room.host) {
         // Inputs are simulated by the host: relay the action to it instead of
         // mutating the server's copy of the world.  A light per-seat floor on
-        // the interval keeps a spammy client from flooding the host.
+        // the interval keeps a spammy client from flooding the host, but only
+        // repeated *unchanged* input is coalesced: the same channel carries the
+        // discrete choices a realtime game asks for (smash's fighter, stage,
+        // stocks), and a floor would swallow them for good - a remote seat
+        // tapping pick -> stage -> stocks loses the taps that arrive inside the
+        // window, with nothing on screen to say so.
         const t = now();
+        const stamp = JSON.stringify(action);
         room.inputSeen ||= {};
-        if (t - (room.inputSeen[playerId] || 0) < 20) return { ok: true };
+        room.lastInput ||= {};
+        if (stamp === room.lastInput[playerId] && t - (room.inputSeen[playerId] || 0) < 20) return { ok: true };
         room.inputSeen[playerId] = t;
+        room.lastInput[playerId] = stamp;
         room.updatedAt = t;
         room.lastActivity = t;
         this.hub?.sendToUser(room.host, { t: 'room:input', roomId: room.id, from: playerId, action });
@@ -471,7 +632,24 @@ export class GameRooms {
   tickAll() {
     const t = now();
     for (const room of this.rooms.values()) {
+      if (room.status === 'lobby') {
+        // Arm/disarm the countdown, then let a ready room start itself.  A room
+        // nobody is using any more is closed here too - the countdown must not
+        // keep an abandoned table alive forever.
+        if (this.syncCountdown(room)) this.touch(room);
+        if (room.autoStartAt && t >= room.autoStartAt && this.canStart(room)) {
+          try {
+            this.start(room);
+          } catch (err) {
+            log(`games: autostart failed for ${room.gameId}:`, err.message);
+          }
+        }
+        if (t - room.lastActivity > 1000 * 60 * 45) this.close(room, 'idle');
+        continue;
+      }
       if (room.status !== 'playing') continue;
+      // A realtime room lives on its host's tab: watch that the stream is alive.
+      this.watchHostStream(room, t);
       if (room.deadline && t > room.deadline) {
         const view = room.engine.view(room.state, room.host || room.players[0]?.id);
         const turn = view?.turn || [];
@@ -558,12 +736,17 @@ export class GameRooms {
       // socket is gone (the grace window keeps the seat, not the connection).
       players: room.players.map((p) => ({ id: p.id, name: p.name, avatar: p.avatar, kind: p.kind, level: p.level, connected: p.connected !== false })),
       hostOutage: this.hostOutage(room),
+      hostStream: this.hostStreamInfo(room),
       spectators: room.spectators.length,
       options: room.options,
       createdAt: room.createdAt,
       updatedAt: room.updatedAt,
       canStart: this.canStart(room),
       realtime: !!room.engine.meta.realtime,
+      // When the room will start itself (0 = not counting down) and how long
+      // the whole countdown is, so a late-joining client can draw the same bar.
+      autoStartAt: room.autoStartAt || 0,
+      autoStartMs: config.autoStartMs,
     };
   }
 
@@ -640,6 +823,19 @@ export class GameRooms {
       players: room.players.map((p) => ({ id: p.id, name: p.name, kind: p.kind })),
       options: room.options,
       createdAt: room.createdAt,
+      // A finished match keeps its verdict in the snapshot as well as the audit:
+      // room snapshots are the long-lived half of the history (the audit is a
+      // rotating window), so "every match of this game" can be answered after
+      // the audit has rolled over.  `result` stays null until the game ends.
+      startedAt: room.startedAt || null,
+      finishedAt: room.finishedAt || null,
+      result: room.finishedAt && room.result
+        ? {
+          at: room.finishedAt,
+          winners: (room.result.winners || []).slice(),
+          summary: String(room.result.summary || '').slice(0, 200),
+        }
+        : null,
       updatedAt: room.updatedAt,
     };
     db.touch();

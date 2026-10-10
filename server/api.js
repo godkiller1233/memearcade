@@ -28,6 +28,7 @@ import { ideaNotify } from './lib/notify.js';
 import {
   audit,
   banUser,
+  chessAnalysis,
   createUser,
   deleteUser,
   dmConversations,
@@ -1084,6 +1085,19 @@ export function registerApi(app, { rooms, hub }) {
   });
 
   /* ---------------- admin: live rooms ---------------- */
+
+  /* ---------------- admin: chess match analysis ---------------- */
+
+  /**
+   * Every finished chess match the arcade can still account for, aggregated for
+   * the console: results by colour, how games ended, the openings that get
+   * played, who beats whom, and what a typical game costs in moves and minutes.
+   * Admin-only - it is match history, not moderation work.
+   */
+  app.get('/api/admin/chess', (ctx) => {
+    requireStaff(ctx, ROLES.admin);
+    return { ok: true, ...chessAnalysis() };
+  });
 
   app.get('/api/admin/rooms', (ctx) => {
     requireStaff(ctx);

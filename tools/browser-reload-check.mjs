@@ -1265,8 +1265,8 @@ async function runRegressionChecks() {
         await until(`document.querySelector('.admin-tabs')`, 'the owner admin panel');
 
         const tabs = await evaluate(`[...document.querySelectorAll('.admin-tabs button')].map((b) => b.textContent.trim())`);
-        const want = ['📊 Overview', '👥 Players', '🎛️ Site', '🎚️ Features', '🎮 Rooms', '📨 Reports', '💡 Ideas', '📜 Audit', '🤖 Discord bot'];
-        check(JSON.stringify(tabs) === JSON.stringify(want), 'the owner panel lists all nine tabs', JSON.stringify(tabs));
+        const want = ['📊 Overview', '👥 Players', '🎛️ Site', '🎚️ Features', '🎮 Rooms', '♟️ Chess', '📨 Reports', '💡 Ideas', '📜 Audit', '🤖 Discord bot'];
+        check(JSON.stringify(tabs) === JSON.stringify(want), 'the owner panel lists all ten tabs', JSON.stringify(tabs));
 
         const head = await evaluate(`(() => { const card = document.querySelector('.admin-tabs')?.closest('.card'); return card ? { text: card.textContent, buttons: [...card.querySelectorAll('button')].map((b) => b.textContent.trim()) } : null; })()`);
         check(!!head && head.text.includes('owner/admin') && !head.text.includes('moderator') && head.buttons.some((t) => t.includes('Broadcast')),
@@ -1302,7 +1302,7 @@ async function runRegressionChecks() {
         }
 
         const problems = [];
-        for (const id of ['overview', 'players', 'site', 'features', 'rooms', 'reports', 'ideas', 'audit', 'bot']) {
+        for (const id of ['overview', 'players', 'site', 'features', 'rooms', 'chess', 'reports', 'ideas', 'audit', 'bot']) {
           await evaluate(`(() => { document.querySelector('.admin-tabs .tab-${id}').click(); return true; })()`);
           try {
             await until(`(() => { const b = document.querySelector('#admin-body'); return !!b && !b.textContent.includes('Loading…'); })()`, `the ${id} tab to draw`, 12000);
@@ -1313,7 +1313,7 @@ async function runRegressionChecks() {
           const drawn = await evaluate(`(() => { const b = document.querySelector('#admin-body'); return { err: !!b.querySelector('.error'), text: b.textContent.replace(/\\s+/g, ' ').trim().slice(0, 80) }; })()`);
           if (drawn.err) problems.push(`${id}: ${drawn.text}`);
         }
-        check(problems.length === 0, 'every owner tab renders without errors', problems.join('; ') || 'all nine tabs');
+        check(problems.length === 0, 'every owner tab renders without errors', problems.join('; ') || 'all ten tabs');
 
         // The Features tab's schedule editor, driven like an owner would: open
         // the Chat row's editor, check the defaults, save a whole-day window
@@ -1681,8 +1681,8 @@ async function main() {
   check(await clickText('Browse all games'), 'opened the games catalog');
   await until(`[...document.querySelectorAll('.game-card')].some((c) => c.textContent.includes('Ping Pong'))`, 'the Ping Pong card');
   await evaluate(`(() => { const card = [...document.querySelectorAll('.game-card')].find((c) => c.textContent.includes('Ping Pong')); [...card.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Play').click(); return true; })()`);
-  await until(`[...document.querySelectorAll('button')].some((b) => b.textContent.includes('Online room'))`, 'the play-options modal');
-  check(await clickText('Online room'), 'created an online room');
+  await until(`[...document.querySelectorAll('button')].some((b) => b.textContent.includes('Play with people'))`, 'the play-options modal');
+  check(await clickText('Play with people'), 'created an online room');
   await until(`[...document.querySelectorAll('button')].some((b) => b.textContent.includes('Add bot'))`, 'the room lobby');
   // The default first-to-5 would end mid-check with an idle host paddle.
   await setRoomTarget(signIn.token, 99);

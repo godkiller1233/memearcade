@@ -20,6 +20,7 @@ const TABS = [
   { id: 'site', label: '🎛️ Site', admin: true },
   { id: 'features', label: '🎚️ Features', admin: true },
   { id: 'rooms', label: '🎮 Rooms' },
+  { id: 'chess', label: '♟️ Chess', admin: true },
   { id: 'reports', label: '📨 Reports' },
   { id: 'ideas', label: '💡 Ideas', admin: true },
   { id: 'audit', label: '📜 Audit', admin: true },
@@ -85,7 +86,7 @@ export function adminView(mount) {
       for (const n of nodes) body.appendChild(n);
     };
     const fail = (err) => draw([el('div', { class: 'card' }, el('p', { class: 'error', text: err.message || 'Something went wrong.' }))]);
-    ({ overview: drawOverview, players: drawPlayers, site: drawSite, features: drawFeatures, rooms: drawRooms, reports: drawReports, ideas: drawIdeas, audit: drawAudit, bot: drawBot })[id](draw, fail, mnt);
+    ({ overview: drawOverview, players: drawPlayers, site: drawSite, features: drawFeatures, rooms: drawRooms, chess: drawChess, reports: drawReports, ideas: drawIdeas, audit: drawAudit, bot: drawBot })[id](draw, fail, mnt);
   }
 
   paintTabs();
@@ -134,6 +135,179 @@ function drawOverview(draw, fail) {
 
 function stat(label, value) {
   return el('div', { class: 'stat' }, el('div', { class: 'stat-num', text: String(value) }), el('div', { class: 'muted small', text: label }));
+}
+
+/* ------------------------------------------------------------------ *
+ * chess match analysis *
+ * ------------------------------------------------------------------ */
+
+/**
+ * Every finished chess match the arcade still knows about, read as a review:
+ * how the games ended, which colour won them, how they opened, who is beating
+ * whom and what a typical game costs.  The server does the counting (store.js
+ * merges the room snapshots with the audit's finer entries); this tab is the
+ * reading of it.
+ */
+function drawChess(draw, fail) {
+  api.get('/api/admin/chess').then((res) => {
+    const t = res.totals || {};
+    const matches = t.matches || 0;
+    const pct = (n) => `${Math.round((Number(n) || 0) * 100)}%`;
+    const day = (at) => (at ? new Date(at).toLocaleDateString() : '—');
+    const when = (at) => (at ? new Date(at).toLocaleString() : '—');
+    const nodes = [];
+
+    nodes.push(el('div', { class: 'card' },
+      el('div', { class: 'row spread' },
+        el('div', { class: 'row' }, el('span', { class: 'icon', text: '♟️' }), el('h3', { text: 'Chess matches' })),
+        el('div', { class: 'row' },
+          pill(res.sources?.auditCapped ? 'audit window (capped)' : 'audit window', res.sources?.auditCapped ? 'warn' : ''),
+          pill(`${fmtNum(res.sources?.rooms ?? 0)} room records`),
+        ),
+      ),
+      el('p', { class: 'muted small', text: matches
+        ? `Every finished chess match still on record, ${day(res.sources?.from)} → ${day(res.sources?.to)}. Detail (colour, plies, opening, end reason) exists for the ${fmtNum(t.reviewed ?? 0)} matches finished since match reviews were added.`
+        : 'No finished chess matches yet. The first one anyone plays shows up here.' }),
+      el('div', { class: 'stat-grid' }, [
+        stat('Matches', fmtNum(matches)),
+        stat('Decisive', fmtNum(t.decisive)),
+        stat('Draws', `${fmtNum(t.draws)} · ${pct(t.drawRate)}`),
+        stat('White wins', fmtNum(t.whiteWins)),
+        stat('Black wins', fmtNum(t.blackWins)),
+        stat('Players', fmtNum(t.humans)),
+        stat('vs bots', fmtNum(t.vsBots)),
+        stat('Avg moves', t.avgPlies == null ? '—' : Number(t.avgPlies).toFixed(1)),
+        stat('Avg length', t.avgMinutes == null ? '—' : `${Number(t.avgMinutes).toFixed(1)} min`),
+        stat('With detail', `${fmtNum(t.reviewed)}/${fmtNum(matches)}`),
+      ]),
+    ));
+
+    // Endings + colour: the two questions a scoreboard cannot answer.
+    const endings = res.endings || [];
+    const colourTotal = (t.whiteWins || 0) + (t.blackWins || 0) + (t.draws || 0);
+    nodes.push(el('div', { class: 'two-up' },
+      el('div', { class: 'card' },
+        el('h3', { text: 'How games ended' }),
+        endings.length
+          ? el('div', { class: 'col' }, endings.map((e) => meterRow(reasonLabel(e.reason), e.count, matches)))
+          : el('p', { class: 'muted', text: 'No matches to classify yet.' }),
+        endings.some((e) => e.reason === 'unrecorded')
+          ? el('p', { class: 'muted small', text: '“Not recorded” are matches finished before end reasons were kept - the summary of an old match is not in the database.' })
+          : null),
+      el('div', { class: 'card' },
+        el('h3', { text: 'By colour and result' }),
+        el('div', { class: 'col' },
+          meterRow('White won', t.whiteWins || 0, colourTotal),
+          meterRow('Black won', t.blackWins || 0, colourTotal),
+          meterRow('Draw', t.draws || 0, colourTotal),
+        ),
+        el('p', { class: 'muted small', text: 'Colour needs match detail, so only reviewed games count here; the totals above cover every match on record.' }))));
+
+    // The opening book: which first moves this arcade actually plays.
+    nodes.push(el('div', { class: 'card' },
+      el('h3', { text: 'Openings' }),
+      (res.openings || []).length
+        ? el('div', { class: 'col' }, res.openings.map((o) => meterRow(o.line, o.count, res.openings.reduce((n, x) => n + x.count, 0), `${fmtNum(o.count)} game${o.count === 1 ? '' : 's'}`)))
+        : el('p', { class: 'muted', text: 'No move data yet - the first two plies of a reviewed match are what builds this list.' })));
+
+    // Who is playing, and who they are playing against.
+    nodes.push(el('div', { class: 'card' },
+      el('h3', { text: 'Players' }),
+      (res.players || []).length
+        ? el('div', { class: 'admin-scroll' },
+            el('table', { class: 'admin-table' },
+              el('tr', {},
+                ['Player', 'Played', 'W', 'L', 'D', 'Win %', 'Points', 'W/B', 'Streak', 'Last played'].map((h) => el('th', { text: h }))),
+              res.players.slice(0, 40).map((p) => el('tr', {},
+                el('td', {}, el('div', { class: 'row' }, avatar(p, 22), el('span', { text: p.name }), p.kind === 'bot' ? pill('bot') : null, p.account === false ? pill('gone', 'warn') : null)),
+                el('td', { text: fmtNum(p.played) }),
+                el('td', { text: fmtNum(p.wins) }),
+                el('td', { text: fmtNum(p.losses) }),
+                el('td', { text: fmtNum(p.draws) }),
+                el('td', { text: pct(p.winRate) }),
+                el('td', { text: fmtNum(p.points) }),
+                el('td', { text: `${fmtNum(p.white)}/${fmtNum(p.black)}` }),
+                el('td', { text: p.streak ? `${fmtNum(p.streak)} (best ${fmtNum(p.bestStreak)})` : fmtNum(p.bestStreak) }),
+                el('td', { class: 'muted small', text: timeAgo(p.lastAt) })))))
+        : el('p', { class: 'muted', text: 'Nobody has finished a chess match yet.' })));
+
+    nodes.push(el('div', { class: 'card' },
+      el('h3', { text: 'Head to head' }),
+      (res.pairings || []).length
+        ? el('div', { class: 'admin-scroll' },
+            el('table', { class: 'admin-table' },
+              el('tr', {}, ['Match-up', 'Games', 'First listed', 'Second listed', 'Draws', 'Last played'].map((h) => el('th', { text: h }))),
+              res.pairings.map((pair) => el('tr', {},
+                el('td', { text: `${pair.a.name} vs ${pair.b.name}${pair.a.kind === 'bot' || pair.b.kind === 'bot' ? ' (bot)' : ''}` }),
+                el('td', { text: fmtNum(pair.matches) }),
+                el('td', { text: fmtNum(pair.aWins) }),
+                el('td', { text: fmtNum(pair.bWins) }),
+                el('td', { text: fmtNum(pair.draws) }),
+                el('td', { class: 'muted small', text: timeAgo(pair.lastAt) })))))
+        : el('p', { class: 'muted', text: 'No repeat opponents yet.' }),
+      t.longest || t.quickest
+        ? el('p', { class: 'muted small', text: [
+            t.longest ? `Longest game: ${fmtNum(t.longest.plies)} plies (${t.longest.names.join(' vs ')})` : null,
+            t.quickest ? `Quickest win: ${fmtNum(t.quickest.plies)} plies (${t.quickest.names.join(' vs ')}, ${reasonLabel(t.quickest.end)})` : null,
+          ].filter(Boolean).join(' · ') })
+        : null));
+
+    // Activity, day by day (server time), so a chess night is visible.
+    const activity = res.activity || [];
+    const busiest = Math.max(1, ...activity.map((d) => d.matches));
+    nodes.push(el('div', { class: 'card' },
+      el('div', { class: 'row spread' },
+        el('h3', { text: `Matches per day (last ${activity.length})` }),
+        res.busiestDay?.matches ? pill(`busiest ${res.busiestDay.date} · ${res.busiestDay.matches}`) : null),
+      el('div', { class: 'spark' }, activity.map((d) => el('div', {
+        class: 'spark-day',
+        title: `${d.date}: ${d.matches} match${d.matches === 1 ? '' : 'es'}`,
+        style: { height: `${Math.max(3, Math.round((d.matches / busiest) * 100))}%` },
+      }))),
+      el('p', { class: 'muted small', text: `${activity[0]?.date || ''} → ${activity[activity.length - 1]?.date || ''}` })));
+
+    // The matches themselves.
+    nodes.push(el('div', { class: 'card' },
+      el('h3', { text: 'Recent matches' }),
+      (res.recent || []).length
+        ? el('div', { class: 'admin-scroll' },
+            el('table', { class: 'admin-table' },
+              el('tr', {}, ['When', 'Players', 'Result', 'Ended by', 'Moves', 'Length', 'Room'].map((h) => el('th', { text: h }))),
+              res.recent.map((m) => el('tr', {},
+                el('td', { class: 'muted small', text: when(m.at) }),
+                el('td', { text: m.players.map((p) => `${p.name}${p.kind === 'bot' ? ' 🤖' : ''}`).join(' vs ') }),
+                el('td', { text: m.result }),
+                el('td', { text: reasonLabel(m.end) }),
+                el('td', { text: m.plies == null ? '—' : fmtNum(m.plies) }),
+                el('td', { text: m.minutes == null ? '—' : `${m.minutes} min` }),
+                el('td', { class: 'muted small mono', text: m.code || '—' })))))
+        : el('p', { class: 'muted', text: 'Nothing finished yet.' })));
+
+    draw(nodes);
+  }).catch(fail);
+}
+
+/** One labelled count with a proportional bar - the analysis' workhorse. */
+function meterRow(label, count, total, extra = null) {
+  const share = total ? Math.round(((Number(count) || 0) / total) * 100) : 0;
+  return el('div', { class: 'meter-row' },
+    el('div', { class: 'row spread' },
+      el('span', { text: label }),
+      el('span', { class: 'muted small', text: `${fmtNum(count)}${total ? ` · ${share}%` : ''}${extra ? ` · ${extra}` : ''}` })),
+    el('div', { class: 'meter' }, el('div', { class: 'meter-fill', style: { width: `${share}%` } })));
+}
+
+/** How a chess game ended, in words (the codes come from the engine). */
+function reasonLabel(reason) {
+  return ({
+    checkmate: 'Checkmate',
+    resignation: 'Resignation',
+    stalemate: 'Stalemate',
+    'fifty-move': '50-move rule',
+    'insufficient-material': 'Insufficient material',
+    repetition: 'Threefold repetition',
+    unrecorded: 'Not recorded',
+  })[reason] || reason || 'Unknown';
 }
 
 function uptimeText(sec) {
