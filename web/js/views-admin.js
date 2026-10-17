@@ -1095,6 +1095,19 @@ function drawBot(draw, fail) {
 }
 
 /**
+ * What to do about an offline bot. A supervisor reason that starts with
+ * "restarting in" means the site is already trying again, so the advice is to
+ * fix the cause and wait - telling someone to restart the site there would make
+ * them think the retry is not happening.
+ */
+function botOffNote(reason) {
+  const retrying = /^restarting in \d+s/.test(String(reason || ''));
+  return retrying
+    ? 'It is retrying on its own for as long as the site is up, so fixing the cause is enough - no restart needed, the next attempt uses it.'
+    : 'It starts with the site as soon as DISCORD_TOKEN is set on this service (a bot/.env on your PC is not deployed), unless MEMES_BOT_AUTOSTART=off.';
+}
+
+/**
  * The servers the bot is in, as the bot last reported them. This panel never
  * talks to Discord: only the bot holds that token, so it reports the list and
  * the console reads it. Each row opens the server so the owner can try the
@@ -1127,7 +1140,7 @@ function botServersCard(presence, health = null) {
         : null),
     el('p', { class: 'muted small', text: `${checkedIn} Open a server to try the commands in it, or copy the message command and paste it in a channel.` }),
     botOff
-      ? el('p', { class: 'muted', text: `⚠️ The bot process is not running: ${botProbe.reason || 'no reason reported'}. The list below is the last check-in it managed, so it may be out of date. Fix the token on this service (or in bot/.env) and restart the site.` })
+      ? el('p', { class: 'muted', text: `⚠️ The bot process is not running: ${botProbe.reason || 'no reason reported'}. ${botOffNote(botProbe.reason)} The list below is the last check-in it managed, so it may be out of date.` })
       : null,
     presence?.stale && presence?.at
       ? el('p', { class: 'muted small', text: 'That check-in is older than 15 minutes, so a server the bot joined or left since then may be missing. The list repairs itself on the next check-in.' })

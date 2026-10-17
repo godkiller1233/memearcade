@@ -23,10 +23,25 @@ const ENV_FILE = path.join(ROOT, 'bot', '.env');
 
 /** A bot that dies faster than this did not really get going. */
 const STABLE_MS = 60000;
-/** Consecutive quick deaths before the supervisor stops trying. */
-const MAX_RAPID_FAILURES = 5;
-/** Wait before each retry; the last delay repeats. */
-const RESTART_DELAYS = [1000, 2000, 4000, 8000, 15000, 30000];
+/**
+ * Wait before each retry: it grows to a five-minute ceiling and stays there.
+ *
+ * The supervisor never gives up while the site is up. "The website works but
+ * the bot is offline" is the one state this exists to prevent, and it is what
+ * happened when it used to stop after five failures - a Discord blip, a restart
+ * that raced the gateway, or a token fixed five minutes later all left the site
+ * healthy and the bot gone until someone restarted the whole service. The
+ * ceiling is what keeps that promise honest: a hopeless configuration (a
+ * rejected token) retries about once every five minutes instead of hammering.
+ */
+const RESTART_DELAYS = [1000, 2000, 4000, 8000, 15000, 30000, 60000, 120000, 300000];
+
+/** The wait before attempt N (0-based), capped at the last delay. */
+export function botRetryDelay(attempt) {
+  const n = Number.isFinite(Number(attempt)) ? Math.max(0, Math.trunc(Number(attempt))) : 0;
+  return RESTART_DELAYS[Math.min(n, RESTART_DELAYS.length - 1)];
+}
+
 /** How long the bot gets to answer SIGTERM before it is taken out. */
 const STOP_GRACE_MS = 4000;
 
@@ -136,25 +151,21 @@ export function startBot({ port, secret, host = config.host, log = () => {}, env
   let child = null;
   let stopping = false;
   let restartTimer = null;
-  let rapidFailures = 0;
+  let attempts = 0;
   let startedAt = 0;
   /** What /api/health and the banner report as the current state. */
   let status = 'started with the site';
 
   const schedule = (reason) => {
     if (stopping || restartTimer) return;
+    // A run that lasted counts as a fresh start: the next failure begins the
+    // quick first retries again instead of starting at five minutes.
     const lifespan = Date.now() - startedAt;
-    if (lifespan >= STABLE_MS) rapidFailures = 0;
-    rapidFailures += 1;
-    if (rapidFailures > MAX_RAPID_FAILURES) {
-      status = `gave up after ${MAX_RAPID_FAILURES} failed starts (${reason})`;
-      log(`Discord bot: ${status}.`);
-      log('Discord bot: fix DISCORD_TOKEN on this service (or in bot/.env), then restart the site - or run npm run bot by hand.');
-      return;
-    }
-    status = `restarting: ${reason}`;
-    const delay = RESTART_DELAYS[Math.min(rapidFailures - 1, RESTART_DELAYS.length - 1)];
-    log(`Discord bot: ${reason} - restarting in ${Math.round(delay / 1000)}s`);
+    if (lifespan >= STABLE_MS) attempts = 0;
+    attempts += 1;
+    const delay = botRetryDelay(attempts - 1);
+    status = `restarting in ${Math.round(delay / 1000)}s: ${reason}`;
+    log(`Discord bot: ${reason} - retrying in ${Math.round(delay / 1000)}s (attempt ${attempts})`);
     restartTimer = setTimeout(() => {
       restartTimer = null;
       start();
@@ -239,6 +250,10 @@ export function startBot({ port, secret, host = config.host, log = () => {}, env
     },
     get pid() {
       return child?.pid ?? null;
+    },
+    /** How many times it has been restarted since the last stable run. */
+    get attempts() {
+      return attempts;
     },
     url,
     stop,

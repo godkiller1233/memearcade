@@ -166,9 +166,11 @@ Environment (Render → your service → Environment) and the site launches
 command to run and nothing to copy into `bot/.env` on the server.
 
 The bot runs in the site's process tree, so it is online exactly when the site
-is. On a free instance the service sleeps after a spell without traffic and the
-bot sleeps with it - which suits an arcade used in bursts. A paid always-on
-instance keeps both up.
+is, and a bot that cannot start is retried with a growing delay - up to five
+minutes apart - for as long as the site is up, so fixing the token is enough
+and the next attempt uses it. On a free instance the service sleeps after a spell
+without traffic and the bot sleeps with it; the next section is how to stop
+that.
 
 If you would rather keep the bot online from your own PC (free), run it at home
 against the deployed site - and switch the built-in copy off first, or two bots
@@ -217,9 +219,11 @@ curl https://<service-name>.onrender.com/api/health
   belongs to a different application. A token pasted with a trailing newline is
   trimmed (the log says when that happened), but a genuinely wrong token cannot
   be fixed from here: reset it in the Developer Portal and paste the new one.
-- `gave up after 5 failed starts (...)` - five quick failures in a row and the
-  supervisor stops retrying, so a broken configuration cannot hammer Discord.
-  Fix the token and **restart the service**; it does not re-arm itself.
+- `restarting in 60s: exited with code 3 - Discord rejected the token` - the
+  supervisor retries as long as the service is up (1s, 2s, 4s ... capped at five
+  minutes), so the bot comes back by itself once the cause is gone. A rejected
+  token never goes away on its own: fix it in the Environment tab, and the next
+  attempt picks it up - **no restart needed**.
 - `started with the site` plus `running: true` - the bot is up. If Discord still
   shows it offline, the service is asleep: send the arcade a request to wake it.
 

@@ -28,7 +28,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { attachWebSocket } from '../server/lib/ws.js';
 import { Arcade } from '../bot/arcade.js';
-import { autoStartEnabled, botConnectionUrl, describeBotExit, readBotEnv } from '../server/bot.js';
+import { autoStartEnabled, botConnectionUrl, botRetryDelay, describeBotExit, readBotEnv } from '../server/bot.js';
 import { DiscordGateway, FULL_INTENTS, SAFE_INTENTS } from '../bot/discord.js';
 import { arcadeEmbed, profileEmbed, formatChangelog, changelogLine, avatarImageUrl, levelColor, describeSwitches, featureOffReply, parseTextCommand, textCommandHelp, textFallbackHints, optionsToObject, TEXT_PREFIX } from '../bot/commands.js';
 import { pong } from '../web/games/engines/arcade.js';
@@ -1464,6 +1464,13 @@ async function checkAutoStart() {
   check(autoStartEnabled({}) && autoStartEnabled({ MEMES_BOT_AUTOSTART: 'on' })
     && !autoStartEnabled({ MEMES_BOT_AUTOSTART: 'off' }) && !autoStartEnabled({ MEMES_BOT_AUTOSTART: '0' }),
     'the site starts the bot by default, and MEMES_BOT_AUTOSTART=off stops it');
+  check(botRetryDelay(0) === 1000 && botRetryDelay(1) === 2000 && botRetryDelay(2) > botRetryDelay(1),
+    'the first retries are quick and grow', `${botRetryDelay(0)}, ${botRetryDelay(1)}, ${botRetryDelay(2)}`);
+  const retryDelays = Array.from({ length: 40 }, (_, i) => botRetryDelay(i));
+  check(retryDelays.every((d) => Number.isFinite(d) && d > 0) && retryDelays.every((d, i) => i === 0 || d >= retryDelays[i - 1]),
+    'the delay stays a real wait for any attempt - the supervisor never gives up', `attempt 39 -> ${botRetryDelay(39)}ms`);
+  check(botRetryDelay(999) === 300000,
+    'the delay is capped at five minutes, so a hopeless token cannot hammer Discord', String(botRetryDelay(999)));
   check(botConnectionUrl(8877, '0.0.0.0') === 'http://127.0.0.1:8877'
     && botConnectionUrl(8877, '::') === 'http://127.0.0.1:8877'
     && botConnectionUrl(8877, '127.0.0.1') === 'http://127.0.0.1:8877',
@@ -1616,6 +1623,53 @@ async function checkAutoStart() {
   } finally {
     await stopChild(noToken);
   }
+  // The promise itself: a supervised bot that cannot come up yet keeps trying
+  // for as long as the site is up, saying when the next attempt is - instead of
+  // giving up for good and leaving a healthy website with no bot.
+  rmSync(AUTO_DATA, { recursive: true, force: true });
+  fake.expectedToken = 'never-this-token';
+  const retryingLogs = [];
+  const retrying = spawn(process.execPath, [path.join(ROOT, 'server', 'index.js')], {
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      MEMES_PORT: String(AUTO_PORT),
+      MEMES_HOST: '127.0.0.1',
+      MEMES_DATA: AUTO_DATA,
+      MEMES_PLATFORM: 'bot-check',
+      MEMES_ADMIN_PASS: ADMIN_PASS,
+      MEMES_BOT_SECRET: `${BOT_SECRET}-auto`,
+      MEMES_BOT_AUTOSTART: 'on',
+      DISCORD_TOKEN: 'wrong-token',
+      DISCORD_API_BASE: `http://127.0.0.1:${FAKE_PORT}/api/v10`,
+      DISCORD_GATEWAY_URL: `ws://127.0.0.1:${FAKE_PORT}/gateway`,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  retrying.stdout.on('data', (b) => retryingLogs.push(String(b)));
+  retrying.stderr.on('data', (b) => retryingLogs.push(String(b)));
+  try {
+    await waitFor(async () => {
+      try {
+        return (await fetch(`${url}/api/health`)).ok;
+      } catch {
+        return false;
+      }
+    }, 20000, 'the retrying arcade');
+    const state = await waitFor(async () => {
+      const health = await (await fetch(`${url}/api/health`)).json();
+      return /restarting in \d+s: .*Discord rejected the token/.test(health.bot?.reason || '') ? health.bot : null;
+    }, 15000, 'the site to schedule another attempt at the bot');
+    check(state.running === false && state.attempts >= 1,
+      'a rejected bot is retried while the site stays up, and health counts the attempts',
+      JSON.stringify(state));
+    check(/retrying in \d+s \(attempt \d+\)/.test(retryingLogs.join('')),
+      'and the log says when the next attempt is',
+      retryingLogs.join('').split('\n').filter((l) => /retrying in/.test(l)).slice(-1).join(' | '));
+  } finally {
+    await stopChild(retrying);
+  }
+  fake.expectedToken = null;
   rmSync(AUTO_DATA, { recursive: true, force: true });
 }
 

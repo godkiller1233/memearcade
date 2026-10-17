@@ -308,15 +308,15 @@ function catalogFor(ctx) {
 export function registerApi(app, { rooms, hub, bot = null }) {
   /**
    * What happened to the Discord bot process: "started with the site",
-   * "restarting: exited with code 1", "gave up after 5 failed starts (...)", or
-   * the reason it never started at all (no token, the switch is off). It is on
-   * the public health payload on purpose - a bot that never comes online is
+   * "restarting in 30s: exited with code 3 - Discord rejected the token", or the
+   * reason it never started at all (no token, the switch is off). It is on the
+   * public health payload on purpose - a bot that never comes online is
    * otherwise invisible unless someone reads the host's logs.
    */
   const botStatus = () => {
     const state = bot?.current;
-    if (!state) return { running: false, reason: 'the bot starts after the server listens' };
-    return { running: !!state.running, reason: String(state.reason || '') };
+    if (!state) return { running: false, reason: 'the bot starts after the server listens', attempts: 0 };
+    return { running: !!state.running, reason: String(state.reason || ''), attempts: Number(state.attempts) || 0 };
   };
   /* ---------------- meta / health ---------------- */
 

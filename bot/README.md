@@ -121,11 +121,13 @@ hands it the port it actually bound and the bot secret it is using, and stops it
 on Ctrl+C. The startup banner names the bot and its pid; if it is not running,
 the banner and the server log say why.
 
-- **It restarts itself.** A dropped connection or an exit gets five attempts
-  with a growing delay (1s to 30s). After that it stops trying and logs the
-  cause - a rejected token, a missing intent, Node older than 22 - so the site
-  does not hammer Discord with a configuration that cannot work. Fix it and
-  restart the site.
+- **It restarts itself, for as long as the site is up.** A dropped connection
+  or an exit is retried with a growing delay - 1s, 2s, 4s ... up to five minutes
+  - and the supervisor never stops trying. That is the promise: a working site
+  never sits there with an offline bot because of one bad minute. A run that
+  stayed up for a while resets the ladder, so the next blip is retried in a
+  second again, and a hopeless configuration (a rejected token) settles into
+  one attempt every five minutes instead of hammering Discord.
 - **Only one copy.** If the site is killed without a chance to clean up
   (SIGKILL, a crash, `node --watch` restarting it), the bot notices its parent
   is gone within a few seconds and exits instead of staying online as a
@@ -141,9 +143,10 @@ the banner and the server log say why.
 - **It says why it is off.** `/api/health` reports the process, not just the
   last server list: `"bot":{"running":true,"reason":"started with the site"}`,
   or the reason instead - no token, `MEMES_BOT_AUTOSTART=off`, `exited with code
-  3 - Discord rejected the token`, `gave up after 5 failed starts (...)`. The
-  admin console's Discord bot panel shows the same state. A token pasted with a
-  trailing newline is trimmed, and the log says when that happened.
+  3 - Discord rejected the token`, `restarting in 60s: ...`, with `attempts`
+  counting the tries since the last good run. The admin console's Discord bot
+  panel shows the same state. A token pasted with a trailing newline is trimmed,
+  and the log says when that happened.
 - **Run it by hand** with `npm run bot` when the bot should outlive the site or
   talk to a deployed one. A hand-run bot reads `ARCADE_BOT_SECRET` from
   `bot/.env`; a site-started one is given the site's own secret.
