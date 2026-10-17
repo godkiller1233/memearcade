@@ -28,7 +28,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { attachWebSocket } from '../server/lib/ws.js';
 import { Arcade } from '../bot/arcade.js';
-import { autoStartEnabled, botConnectionUrl, botRetryDelay, describeBotExit, readBotEnv } from '../server/bot.js';
+import { autoStartEnabled, botAppId, botConnectionUrl, botRetryDelay, describeBotExit, readBotEnv } from '../server/bot.js';
 import { DiscordGateway, FULL_INTENTS, SAFE_INTENTS } from '../bot/discord.js';
 import { arcadeEmbed, profileEmbed, formatChangelog, changelogLine, avatarImageUrl, levelColor, describeSwitches, featureOffReply, parseTextCommand, textCommandHelp, textFallbackHints, optionsToObject, TEXT_PREFIX } from '../bot/commands.js';
 import { pong } from '../web/games/engines/arcade.js';
@@ -1464,6 +1464,21 @@ async function checkAutoStart() {
   check(autoStartEnabled({}) && autoStartEnabled({ MEMES_BOT_AUTOSTART: 'on' })
     && !autoStartEnabled({ MEMES_BOT_AUTOSTART: 'off' }) && !autoStartEnabled({ MEMES_BOT_AUTOSTART: '0' }),
     'the site starts the bot by default, and MEMES_BOT_AUTOSTART=off stops it');
+  // The console's invite link needs the application id, and the bot cannot
+  // report it before it has connected - which is what the invite makes possible.
+  // A token carries it: the part before the first dot is base64 of the bot's
+  // user id, which for a bot is its application id.
+  const TOKEN_ID = 'MTIzNDU2Nzg5MDEyMzQ1Njc4'; // base64 of 123456789012345678
+  check(botAppId({ env: { DISCORD_CLIENT_ID: '987654321098765432' }, fileEnv: {} }) === '987654321098765432',
+    'DISCORD_CLIENT_ID answers the application id outright', 'explicit env var');
+  check(botAppId({ env: { DISCORD_TOKEN: `${TOKEN_ID}.GaBcDe.fake-signature` }, fileEnv: {} }) === '123456789012345678',
+    'a bot token carries the application id, so the invite link exists with no client id and no network');
+  check(botAppId({ env: {}, fileEnv: { DISCORD_TOKEN: `  ${TOKEN_ID}.GaBcDe.sig\n` } }) === '123456789012345678',
+    'a token pasted with whitespace still yields the id (the same trimming the bot does)');
+  check(botAppId({ env: { DISCORD_TOKEN: 'not-a-token' }, fileEnv: {} }) === null
+    && botAppId({ env: {}, fileEnv: {} }) === null
+    && botAppId({ env: { DISCORD_CLIENT_ID: 'not an id', DISCORD_TOKEN: '' }, fileEnv: {} }) === null,
+    'anything that is not an id yields null instead of a broken link or a token leak');
   check(botRetryDelay(0) === 1000 && botRetryDelay(1) === 2000 && botRetryDelay(2) > botRetryDelay(1),
     'the first retries are quick and grow', `${botRetryDelay(0)}, ${botRetryDelay(1)}, ${botRetryDelay(2)}`);
   const retryDelays = Array.from({ length: 40 }, (_, i) => botRetryDelay(i));

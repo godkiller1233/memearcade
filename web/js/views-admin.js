@@ -1138,6 +1138,9 @@ function botServersCard(presence, health = null) {
       presence?.inviteUrl
         ? el('a', { class: 'btn sm', href: presence.inviteUrl, target: '_blank', rel: 'noopener noreferrer', text: '➕ Add to a server', style: { whiteSpace: 'nowrap' } })
         : null),
+    presence && !presence.inviteUrl
+      ? el('p', { class: 'muted small', text: 'No invite link yet: set DISCORD_CLIENT_ID (Developer Portal → General Information → Application ID) in this service\'s environment, or set DISCORD_TOKEN - the token carries the same id. Then this button appears, even before the bot is online.' })
+      : null,
     el('p', { class: 'muted small', text: `${checkedIn} Open a server to try the commands in it, or copy the message command and paste it in a channel.` }),
     botOff
       ? el('p', { class: 'muted', text: `⚠️ The bot process is not running: ${botProbe.reason || 'no reason reported'}. ${botOffNote(botProbe.reason)} The list below is the last check-in it managed, so it may be out of date.` })

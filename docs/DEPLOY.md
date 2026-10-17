@@ -172,6 +172,14 @@ and the next attempt uses it. On a free instance the service sleeps after a spel
 without traffic and the bot sleeps with it; the next section is how to stop
 that.
 
+**Adding the bot to a server.** **Admin console → 🤖 Discord bot → 🌐 Servers →
+➕ Add to a server** builds the invite from the bot's application id, which the
+site reads from `DISCORD_CLIENT_ID` (Developer Portal → General Information →
+Application ID) or, failing that, from `DISCORD_TOKEN` itself - the part before
+the first dot is base64 of the bot's user id. So the button is there before the
+bot has ever connected; with neither value set the panel says what to add
+instead of quietly hiding it.
+
 If you would rather keep the bot online from your own PC (free), run it at home
 against the deployed site - and switch the built-in copy off first, or two bots
 would answer every command:

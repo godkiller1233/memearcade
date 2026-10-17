@@ -80,6 +80,12 @@ first seen, and an **Open in Discord** button plus a copyable `!memearcade help`
 That is the fastest way to check the bot before a match night: open the server
 and try a command there, where the channels and permissions are real.
 
+The **➕ Add to a server** button does not wait for that report: the site builds
+the invite from `DISCORD_CLIENT_ID`, or from the token itself when that is not
+set, so a bot that has never been online can still be invited. Only the id -
+never the token - reaches the browser, and without either value the panel says
+what to add.
+
 The arcade keeps a **memory** of every server the bot has been in, not just the
 last report. A server missing from a complete report is marked as left (it moves
 to **🕘 Previously in**, with when it left) instead of disappearing, and a server

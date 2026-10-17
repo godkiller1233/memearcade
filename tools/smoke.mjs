@@ -40,6 +40,8 @@ if (target && !/^https?:\/\//i.test(target)) {
 const PORT = 8791 + Math.floor(Math.random() * 40);
 const DATA = path.join(ROOT, 'data', 'smoke');
 const SMOKE_ADMIN_PASS = 'smoke-admin-2026';
+/** A stand-in application id: the console's invite link is built from it. */
+const SMOKE_CLIENT_ID = '123456789012345678';
 const ADMIN_USER = process.env.MEMES_ADMIN_USER || 'memegodmidas';
 
 let failures = 0;
@@ -210,7 +212,7 @@ async function startLocal() {
     cwd: ROOT,
     // A fast schedule tick: the scheduled-switch checks cross a window boundary
     // in seconds and cannot wait for the production 20s sweep.
-    env: { ...process.env, MEMES_PORT: String(PORT), MEMES_HOST: '127.0.0.1', MEMES_DATA: DATA, MEMES_PLATFORM: 'smoke', MEMES_BOT_AUTOSTART: 'off', MEMES_ADMIN_PASS: process.env.MEMES_ADMIN_PASS || SMOKE_ADMIN_PASS, MEMES_SCHEDULE_TICK_MS: '500' },
+    env: { ...process.env, MEMES_PORT: String(PORT), MEMES_HOST: '127.0.0.1', MEMES_DATA: DATA, MEMES_PLATFORM: 'smoke', MEMES_BOT_AUTOSTART: 'off', MEMES_ADMIN_PASS: process.env.MEMES_ADMIN_PASS || SMOKE_ADMIN_PASS, MEMES_SCHEDULE_TICK_MS: '500', DISCORD_CLIENT_ID: SMOKE_CLIENT_ID },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stderr.on('data', (b) => process.stderr.write(`[server] ${b}`));
@@ -322,6 +324,18 @@ async function run() {
     const owner = await login.json().catch(() => null);
     check(!!owner?.token, 'the owner signs in for idea triage', owner?.message);
     const ownerToken = owner?.token || '';
+
+    // The console's "Add to a server" button needs an application id, and it
+    // must not wait for the bot's first check-in - that check-in is what adding
+    // the bot makes possible. DISCORD_CLIENT_ID answers it, so the link exists
+    // on a bot that has never been online (the scratch server reports no bot).
+    const botPanel = ownerToken ? await api('GET', '/api/admin/bot/guilds', undefined, ownerToken) : null;
+    const inviteUrl = botPanel?.payload?.inviteUrl || '';
+    const inviteOk = target
+      ? !inviteUrl || /^https:\/\/discord\.com\/oauth2\/authorize\?client_id=\d{5,25}&scope=bot\+applications\.commands/.test(inviteUrl)
+      : inviteUrl.includes(`client_id=${SMOKE_CLIENT_ID}`) && inviteUrl.includes('scope=bot+applications.commands');
+    check(inviteOk, 'the invite link exists before the bot has ever checked in',
+      `${inviteUrl || 'no link'} (checked in: ${botPanel?.payload?.at ? 'yes' : 'no'})`);
 
     const updates = (notes, id = ideaId) => notes.filter((n) => n.kind === 'suggestion-update' && n.suggestionId === id);
     const settle = () => new Promise((r) => setTimeout(r, 500));

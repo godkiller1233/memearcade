@@ -53,6 +53,7 @@ import {
   userPublic,
 } from './store.js';
 import { engineCatalog, engineErrors, getEngine } from './games.js';
+import { botAppId } from './bot.js';
 import {
   DEFAULT_KEEP_ROLE,
   DEFAULT_SCHEDULE,
@@ -1347,6 +1348,11 @@ export function registerApi(app, { rooms, hub, bot = null }) {
   app.get('/api/admin/bot/guilds', (ctx) => {
     requireStaff(ctx, ROLES.admin);
     const presence = db.data.botPresence || null;
+    // The invite link must not wait for a check-in: a bot that has never been
+    // online is exactly the one somebody needs to invite, and the panel hid the
+    // button in that state. The bot's own report answers it once it has one;
+    // before that, DISCORD_CLIENT_ID or the token itself does (see botAppId).
+    const appId = presence?.appId || botAppId();
     const age = presence?.at ? Math.max(0, now() - presence.at) : null;
     let rows = Object.values(db.data.botGuilds || {});
     if (!rows.length && presence?.guilds?.length) {
@@ -1365,7 +1371,7 @@ export function registerApi(app, { rooms, hub, bot = null }) {
       age,
       stale: age === null || age > BOT_PRESENCE_STALE_MS,
       bot: presence ? { id: presence.appId, username: presence.username } : null,
-      inviteUrl: presence?.appId ? botInviteUrl(presence.appId) : null,
+      inviteUrl: appId ? botInviteUrl(appId) : null,
       guilds,
       left,
     };

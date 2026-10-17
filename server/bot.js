@@ -98,6 +98,34 @@ export function botConnectionUrl(port, host = '') {
 }
 
 /**
+ * The bot's application id, for the console's "Add to a server" link.
+ *
+ * The link used to come only from the bot's own check-in, which is the thing
+ * inviting it makes possible - so a bot that had never connected could not be
+ * added from the panel at all, the button was simply missing. DISCORD_CLIENT_ID
+ * (Developer Portal -> General Information -> Application ID) answers it
+ * outright; failing that, a bot token carries it: everything before the first
+ * dot is the base64 of the bot's user id, and for a bot that is its application
+ * id. Nothing here touches the network, and the token never leaves this
+ * function.
+ */
+export function botAppId({ env = process.env, fileEnv = readBotEnv() } = {}) {
+  const merged = { ...fileEnv, ...env };
+  const explicit = String(merged.DISCORD_CLIENT_ID ?? merged.DISCORD_APP_ID ?? '').trim();
+  if (/^\d{5,25}$/.test(explicit)) return explicit;
+  const token = String(merged.DISCORD_TOKEN ?? '').trim();
+  if (!token) return null;
+  const head = token.split('.')[0] || '';
+  if (!head) return null;
+  try {
+    const decoded = Buffer.from(head.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8').trim();
+    return /^\d{5,25}$/.test(decoded) ? decoded : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * @returns {{running: boolean, reason: string, pid: number|null, url: string, stop: () => Promise<void>}}
  *   Always an object: the banner and the shutdown both use it, and "not
  *   running" is a normal answer, not an error.
