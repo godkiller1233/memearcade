@@ -700,6 +700,191 @@ export async function runCommand(name, rawOptions, ctx) {
 }
 
 /* ------------------------------------------------------------------ *
+ * text fallback: !memearcade <command>
+ * ------------------------------------------------------------------ */
+
+/**
+ * Slash commands can take up to an hour to appear (and never do if the invite
+ * lacked the applications.commands scope), so every command also answers to a
+ * plain message: `!memearcade <command>`.  The parser builds the same option
+ * objects Discord sends for an interaction, so runCommand, the feature
+ * switches and the validation are shared and cannot drift apart.
+ */
+export const TEXT_PREFIX = '!memearcade';
+
+/** Extra spellings accepted after the prefix; the slash name always works too. */
+const TEXT_ALIASES = { me: 'arcade', stats: 'arcade', lb: 'leaderboard', board: 'ideas', shipped: 'changelog' };
+
+/** Words a player can type instead of picking a slash choice. */
+const SORT_WORDS = { level: 'level', xp: 'level', wins: 'wins', win: 'wins', games: 'games', played: 'games' };
+const IDEA_SORTS = { top: 'top', voted: 'top', new: 'new', newest: 'new' };
+const IDEA_STATUS = { open: 'open', planned: 'planned', 'in-progress': 'in-progress', inprogress: 'in-progress', wip: 'in-progress', done: 'done', declined: 'declined', all: 'all' };
+const IDEA_CATEGORY = { game: 'game', games: 'game', feature: 'feature', features: 'feature', update: 'update', updates: 'update', other: 'other' };
+
+/** The text form of one command, built from the same definition Discord gets. */
+export function textUsage(name) {
+  if (name === 'suggest') return `${TEXT_PREFIX} suggest <title> | <details> | [category]`;
+  const def = COMMAND_DEFINITIONS.find((c) => c.name === name);
+  if (!def) return TEXT_PREFIX;
+  const args = (def.options || []).map((o) => (o.required ? `<${o.name}>` : `[${o.name}]`));
+  return [TEXT_PREFIX, def.name, ...args].join(' ');
+}
+
+/**
+ * Every command as a line a player can copy, plus the two syntaxes the parser
+ * accepts.  Built from COMMAND_DEFINITIONS so a new slash command shows up here
+ * without a second edit.
+ */
+export function textCommandHelp() {
+  return [
+    `📖 **Text commands** - \`${TEXT_PREFIX} <command>\` works even when slash commands are not showing up yet.`,
+    ...COMMAND_DEFINITIONS.map((def) => `• \`${textUsage(def.name)}\` — ${def.description}`),
+    '',
+    'Options can be written `name:value` (`!memearcade ideas status:open category:game`), or in the order shown (`!memearcade vote a1b2c3d4`).',
+    'Private answers - your stats, a link code, a vote - arrive as a DM, the same ones the slash commands answer privately.',
+  ].join('\n');
+}
+
+/**
+ * `name:value` pairs for the options this command actually has, or null when
+ * the text is not written that way.  Each value runs to the next known key, so
+ * a title or a game name may contain spaces.
+ */
+function textKeyedValues(def, text) {
+  const names = (def.options || []).map((o) => o.name).filter(Boolean);
+  if (!names.length) return null;
+  const pattern = new RegExp(`(?:^|\\s)(${names.join('|')})\\s*:\\s*`, 'gi');
+  const hits = [...text.matchAll(pattern)];
+  if (!hits.length) return null;
+  const values = {};
+  hits.forEach((hit, i) => {
+    const start = hit.index + hit[0].length;
+    const end = i + 1 < hits.length ? hits[i + 1].index : text.length;
+    values[hit[1].toLowerCase()] = text.slice(start, end).trim();
+  });
+  return values;
+}
+
+/** The options for one command's free text, keyed or positional. */
+function textOptions(def, tail) {
+  const keyed = textKeyedValues(def, tail);
+  if (keyed) {
+    return {
+      options: (def.options || [])
+        .filter((o) => keyed[o.name] !== undefined && keyed[o.name] !== '')
+        .map((o) => ({ name: o.name, value: keyed[o.name] })),
+    };
+  }
+
+  const words = tail.split(/\s+/).filter(Boolean);
+  switch (def.name) {
+    case 'arcade':
+    case 'profile':
+      // A name is the whole tail, spaces and all - player names may contain them.
+      return { options: tail ? [{ name: 'player', value: tail.slice(0, 32) }] : [] };
+    case 'leaderboard': {
+      const sort = SORT_WORDS[words[0]?.toLowerCase()];
+      const game = (sort ? words.slice(1) : words).join(' ').slice(0, 40);
+      return {
+        options: [
+          ...(sort ? [{ name: 'sort', value: sort }] : []),
+          ...(game ? [{ name: 'game', value: game }] : []),
+        ],
+      };
+    }
+    case 'ideas': {
+      // "in progress" is two words but one status.
+      const filters = words.join(' ').replace(/\bin[ -]?progress\b/gi, 'in-progress').split(/\s+/).filter(Boolean);
+      const chosen = {};
+      for (const word of filters) {
+        const w = word.toLowerCase();
+        if (!chosen.sort && IDEA_SORTS[w]) chosen.sort = IDEA_SORTS[w];
+        else if (!chosen.status && IDEA_STATUS[w]) chosen.status = IDEA_STATUS[w];
+        else if (!chosen.category && IDEA_CATEGORY[w]) chosen.category = IDEA_CATEGORY[w];
+        else {
+          return {
+            error: [
+              `🤔 \`${word}\` is not an idea filter.`,
+              `Try \`${TEXT_PREFIX} ideas [top|new] [open|planned|in-progress|done|declined] [game|feature|update|other]\`.`,
+            ].join(' '),
+          };
+        }
+      }
+      return { options: Object.entries(chosen).map(([name, value]) => ({ name, value })) };
+    }
+    case 'vote': {
+      const idea = words[0]?.replace(/^#/, '');
+      if (!idea) return { error: `Pass an idea id from \`${TEXT_PREFIX} ideas\`: \`${TEXT_PREFIX} vote <id>\`.` };
+      return { options: [{ name: 'idea', value: idea.slice(0, 12) }] };
+    }
+    case 'suggest': {
+      // title | details | category - the pipes are what keep spaces in a title.
+      const parts = tail.split('|').map((part) => part.trim());
+      const last = parts[parts.length - 1]?.toLowerCase();
+      const hasCategory = parts.length > 2 && CATEGORY_CHOICES.some((c) => c.value === last);
+      const title = parts[0] || '';
+      const details = (hasCategory ? parts.slice(1, -1) : parts.slice(1)).join(' | ').trim();
+      if (!title || !details) {
+        return {
+          error: [
+            'Give `suggest` a title and details, separated by `|`:',
+            `\`${TEXT_PREFIX} suggest Kart racing | A top-down racer with meme power-ups. | game\``,
+            `The last part is optional - ${CATEGORY_CHOICES.map((c) => c.value).join(', ')}.`,
+          ].join('\n'),
+        };
+      }
+      return {
+        options: [
+          { name: 'title', value: title.slice(0, 120) },
+          { name: 'details', value: details.slice(0, 2000) },
+          { name: 'category', value: hasCategory ? IDEA_CATEGORY[last] : 'feature' },
+        ],
+      };
+    }
+    default:
+      return { options: [] };
+  }
+}
+
+/**
+ * Reads `!memearcade <command> [args]`.
+ * @returns {null | {help: true} | {error: string} | {name: string, options: Array<{name: string, value: string}>}}
+ *   null when the message is not a text command at all, so the bot stays quiet
+ *   in a normal conversation.
+ */
+export function parseTextCommand(text) {
+  const match = /^!memearcade(?:\s+([\s\S]*))?$/i.exec(String(text ?? '').trim());
+  if (!match) return null;
+  const rest = (match[1] || '').trim();
+  const split = rest.search(/\s/);
+  const head = (split === -1 ? rest : rest.slice(0, split)).replace(/^[/!]+/, '').toLowerCase();
+  const tail = split === -1 ? '' : rest.slice(split + 1).trim();
+  if (!head || ['help', 'commands', '?', '-h', '--help'].includes(head)) return { help: true };
+
+  const name = TEXT_ALIASES[head] || head;
+  const def = COMMAND_DEFINITIONS.find((c) => c.name === name);
+  if (!def) {
+    return { error: `🤔 \`${head}\` is not a command. Try \`${TEXT_PREFIX} help\` for the list.` };
+  }
+  const parsed = textOptions(def, tail);
+  if (parsed.error) return parsed;
+  return { name, options: parsed.options };
+}
+
+// Every slash command named in a reply, so its hint can be made usable below.
+const COMMAND_NAME_RE = new RegExp(`/(${COMMAND_DEFINITIONS.map((c) => c.name).join('|')})\\b`, 'g');
+
+/**
+ * A reply written for slash commands (`Run /link`, `Vote with /vote`) becomes
+ * the text form when it is delivered by the fallback: a player who is typing
+ * `!memearcade` almost certainly cannot see the slash commands yet, so a slash
+ * hint would be a dead end.
+ */
+export function textFallbackHints(content) {
+  return String(content || '').replace(COMMAND_NAME_RE, `${TEXT_PREFIX} $1`);
+}
+
+/* ------------------------------------------------------------------ *
  * option autocomplete
  * ------------------------------------------------------------------ */
 

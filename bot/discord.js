@@ -8,6 +8,24 @@
  */
 const DEFAULT_API = 'https://discord.com/api/v10';
 
+/**
+ * The gateway intents this bot needs.  GUILDS is all slash commands require.
+ * GUILD_MESSAGES and DIRECT_MESSAGES carry the `!memearcade` text fallback, and
+ * MESSAGE_CONTENT is what makes a guild message's text readable at all - it is
+ * privileged, so an operator has to tick it in the Developer Portal.  Without
+ * it the bot falls back to SAFE_INTENTS (see the 4014 handling below) instead
+ * of going offline: DMs still carry their text, and slash commands are
+ * untouched.
+ */
+export const INTENT_BITS = {
+  GUILDS: 1 << 0,
+  GUILD_MESSAGES: 1 << 9,
+  DIRECT_MESSAGES: 1 << 12,
+  MESSAGE_CONTENT: 1 << 15,
+};
+export const SAFE_INTENTS = INTENT_BITS.GUILDS | INTENT_BITS.GUILD_MESSAGES | INTENT_BITS.DIRECT_MESSAGES;
+export const FULL_INTENTS = SAFE_INTENTS | INTENT_BITS.MESSAGE_CONTENT;
+
 export class DiscordRest {
   constructor({ token, base = DEFAULT_API, fetchImpl = fetch }) {
     this.token = token;
@@ -78,6 +96,16 @@ export class DiscordRest {
   editOriginal(interactionToken, data) {
     return this.request('PATCH', `/webhooks/${this.applicationId}/${interactionToken}/messages/@original`, data, { auth: false });
   }
+
+  /** Post a message in a channel - the reply path for text commands. */
+  createMessage(channelId, data) {
+    return this.request('POST', `/channels/${channelId}/messages`, data);
+  }
+
+  /** Open (or reuse) the DM channel with a user, so a private reply stays private. */
+  createDmChannel(userId) {
+    return this.request('POST', '/users/@me/channels', { recipient_id: userId });
+  }
 }
 
 /** Discord gateway close codes worth explaining in the logs. */
@@ -95,9 +123,11 @@ export class DiscordGateway {
    * @param {() => Promise<string>} opts.gatewayUrl  resolves the ws url
    * @param {(type: string, data: object) => void} opts.onDispatch
    * @param {(msg: string) => void} [opts.log]
+   * @param {number} [opts.intents]  gateway intent bitmask (default: no privileged intents)
    */
-  constructor({ token, gatewayUrl, onDispatch, log = () => {} }) {
+  constructor({ token, gatewayUrl, onDispatch, log = () => {}, intents = SAFE_INTENTS }) {
     this.token = token;
+    this.intents = intents;
     this.gatewayUrl = gatewayUrl;
     this.onDispatch = onDispatch;
     this.log = log;
@@ -160,6 +190,15 @@ export class DiscordGateway {
     socket.onclose = (ev) => {
       clearInterval(this.heartbeatTimer);
       if (this.stopped) return;
+      // 4014 means Discord refused the intent mask.  The only privileged bit we
+      // ask for is Message Content, so drop it and reconnect: slash commands and
+      // DMs keep working, and the log says what the owner has to tick.
+      if (ev.code === 4014 && (this.intents & INTENT_BITS.MESSAGE_CONTENT)) {
+        this.intents &= ~INTENT_BITS.MESSAGE_CONTENT;
+        this.log('Discord refused the Message Content intent - reconnecting without it. !memearcade still works in DMs; enable "Message Content Intent" in the Developer Portal to use it in servers.');
+        this.retry();
+        return;
+      }
       const fatal = FATAL_CODES[ev.code];
       if (fatal) {
         this.fatal = fatal;
@@ -240,12 +279,11 @@ export class DiscordGateway {
   }
 
   identify() {
-    // GUILDS is all slash commands need - no privileged intents required.
     this.send({
       op: 2,
       d: {
         token: this.token,
-        intents: 1,
+        intents: this.intents,
         properties: { os: process.platform, browser: 'memes-arcade-bot', device: 'memes-arcade-bot' },
       },
     });

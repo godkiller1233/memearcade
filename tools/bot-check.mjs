@@ -27,13 +27,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { attachWebSocket } from '../server/lib/ws.js';
 import { Arcade } from '../bot/arcade.js';
-import { arcadeEmbed, profileEmbed, formatChangelog, changelogLine, avatarImageUrl, levelColor, describeSwitches, featureOffReply } from '../bot/commands.js';
+import { DiscordGateway, FULL_INTENTS, SAFE_INTENTS } from '../bot/discord.js';
+import { arcadeEmbed, profileEmbed, formatChangelog, changelogLine, avatarImageUrl, levelColor, describeSwitches, featureOffReply, parseTextCommand, textCommandHelp, textFallbackHints, optionsToObject, TEXT_PREFIX } from '../bot/commands.js';
 import { pong } from '../web/games/engines/arcade.js';
 import { stopChild } from './lib/stop-child.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ARCADE_PORT = 8811 + Math.floor(Math.random() * 40);
 const FAKE_PORT = 9411 + Math.floor(Math.random() * 40);
+const STRICT_PORT = FAKE_PORT + 137; // a gateway that refuses the privileged intent, like an unconfigured app
 const DATA = path.join(ROOT, 'data', 'bot-check');
 const BOT_SECRET = 'bot-check-secret-4f9a2c7d1e28';
 const APP_ID = '900000000000000001';
@@ -62,9 +64,13 @@ const fake = {
   commands: null,
   callbacks: new Map(), // interaction token -> callback body
   messages: new Map(), // interaction token -> edited message body
+  channelMessages: [], // { channelId, body } posted by the bot (text replies and DMs)
+  dmBlocked: new Set(), // discord ids whose DMs the fake refuses, like a closed privacy setting
   connections: new Set(),
   seq: 1,
   identified: 0,
+  intents: [], // intent mask on every IDENTIFY, in order
+  strictIntents: [], // the strict gateway's IDENTIFY masks
 };
 
 const readBody = (req) => new Promise((resolve) => {
@@ -95,6 +101,16 @@ function startFakeDiscord() {
     }
     if (url.pathname === '/api/v10/gateway/bot') {
       return json(200, { url: `ws://127.0.0.1:${FAKE_PORT}/gateway` });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/v10/users/@me/channels') {
+      const id = body?.recipient_id;
+      if (fake.dmBlocked.has(id)) return json(403, { message: 'Cannot send messages to this user' });
+      return json(200, { id: `dm-${id}`, type: 1 });
+    }
+    const postMessage = url.pathname.match(/^\/api\/v10\/channels\/([^/]+)\/messages$/);
+    if (req.method === 'POST' && postMessage) {
+      fake.channelMessages.push({ channelId: postMessage[1], body });
+      return json(200, { id: `cmsg-${fake.channelMessages.length}`, ...body });
     }
     if (req.method === 'PUT' && /^\/api\/v10\/applications\/[^/]+\/commands$/.test(url.pathname)) {
       fake.commands = body;
@@ -134,6 +150,7 @@ function startFakeDiscord() {
         }
         if (msg.op === 2) {
           fake.identified++;
+          fake.intents.push(msg.d?.intents ?? 0);
           conn.send({
             op: 0,
             t: 'READY',
@@ -149,6 +166,90 @@ function startFakeDiscord() {
       });
     },
   });
+}
+
+let strictHttp = null;
+let strictWs = null;
+
+/**
+ * A second gateway that behaves like a Discord app whose owner never enabled
+ * Message Content: the IDENTIFY carrying the privileged bit is closed with
+ * 4014, and the retry without it is accepted. The bot must reconnect instead of
+ * dying, so slash commands survive an app that was never configured.
+ */
+function startStrictGateway() {
+  strictHttp = http.createServer((req, res) => {
+    res.writeHead(404);
+    res.end();
+  });
+  strictWs = attachWebSocket(strictHttp, {
+    path: '/gateway-strict',
+    pingIntervalMs: 60000,
+    onConnection: (conn) => {
+      conn.send({ op: 10, d: { heartbeat_interval: 45000 } });
+      conn.on('message', (raw) => {
+        let msg;
+        try {
+          msg = JSON.parse(String(raw));
+        } catch {
+          return;
+        }
+        if (msg.op === 2) {
+          const intents = msg.d?.intents ?? 0;
+          fake.strictIntents.push(intents);
+          if (intents & 32768) {
+            conn.close(4014, 'disallowed intents');
+            return;
+          }
+          conn.send({
+            op: 0,
+            t: 'READY',
+            s: fake.seq++,
+            d: {
+              user: { id: APP_ID, username: 'strict-bot' },
+              session_id: 'strict-session',
+              resume_gateway_url: `ws://127.0.0.1:${STRICT_PORT}/gateway-strict`,
+            },
+          });
+        }
+        if (msg.op === 1) conn.send({ op: 11 });
+      });
+    },
+  });
+  return new Promise((resolve, reject) => {
+    strictHttp.once('error', reject);
+    strictHttp.listen(STRICT_PORT, '127.0.0.1', resolve);
+  });
+}
+
+/** Push a MESSAGE_CREATE, the event the text fallback reads. */
+function pushMessage(author, content, id) {
+  const conn = [...fake.connections][0];
+  if (!conn) throw new Error('the bot is not connected to the fake gateway');
+  conn.send({
+    op: 0,
+    t: 'MESSAGE_CREATE',
+    s: fake.seq++,
+    d: {
+      id,
+      content,
+      channel_id: 'chan-1',
+      guild_id: 'guild-1',
+      author: { id: author.id, username: author.username, global_name: author.global_name, bot: !!author.bot },
+      timestamp: new Date().toISOString(),
+    },
+  });
+}
+
+/** Waits for a message the bot posted, in a channel or a DM. */
+async function waitForChannelMessage(predicate, label, timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const hit = fake.channelMessages.find(predicate);
+    if (hit) return hit;
+    await sleep(60);
+  }
+  throw new Error(`no message for ${label}`);
 }
 
 /** Push an INTERACTION_CREATE and wait for the bot's edited reply. */
@@ -361,9 +462,11 @@ async function cleanup() {
   await stopChild(arcadeServer);
   try {
     fakeWs?.close();
+    strictWs?.close();
   } catch {}
   try {
     fakeHttp?.close();
+    strictHttp?.close();
   } catch {}
   // Leave no scratch data behind: the stray-state check fails the build on any
   // suite that does (see tools/leak-check.mjs).
@@ -392,6 +495,36 @@ async function run() {
   const gameOption = leaderboardDef?.options?.find((o) => o.name === 'game');
   check(gameOption?.autocomplete === true && gameOption.choices === undefined,
     '/leaderboard game: asks Discord for autocomplete instead of fixed choices', JSON.stringify(gameOption));
+  // The text fallback needs message events and, for text in servers, the
+  // privileged Message Content bit - so the bot has to ask for both.
+  check(fake.intents[0] === FULL_INTENTS,
+    'the bot asks for the intents text commands need', `${fake.intents[0]} (wanted ${FULL_INTENTS})`);
+
+  /* 1b. an app that never enabled Message Content: Discord closes the gateway
+         with 4014. The bot must retry without that one bit, not go offline. */
+  await startStrictGateway();
+  const strictLogs = [];
+  const probe = new DiscordGateway({
+    token: 'fake-token',
+    intents: FULL_INTENTS,
+    gatewayUrl: async () => `ws://127.0.0.1:${STRICT_PORT}/gateway-strict`,
+    onDispatch: () => {},
+    log: (m) => strictLogs.push(m),
+  });
+  probe.start();
+  let fellBack = false;
+  try {
+    fellBack = !!(await waitFor(() => probe.ready, 9000, 'the gateway to retry without the privileged intent'));
+  } catch {
+    fellBack = false;
+  }
+  check(fellBack, 'the gateway reconnects when Discord refuses the Message Content intent', strictLogs.join(' | '));
+  check(JSON.stringify(fake.strictIntents) === JSON.stringify([FULL_INTENTS, SAFE_INTENTS]),
+    'the retry drops only the privileged bit and keeps GUILDS, GUILD_MESSAGES and DMs',
+    `${JSON.stringify(fake.strictIntents)} (safe ${SAFE_INTENTS})`);
+  check(strictLogs.some((line) => /Message Content/.test(line)),
+    'the fallback says which Developer Portal switch is missing', strictLogs.join(' | '));
+  probe.stop();
 
   /* 2. seed the board through the website API */
   const fan = await register('ideafan');
@@ -952,6 +1085,130 @@ async function run() {
   check(boardRestored.ok && boardRestored.payload?.closed === false && boardRestored.payload?.hasSchedule === false, 'the schedule is cleared again', JSON.stringify(boardRestored.payload?.schedule));
   const boardBack = await interact(fanUser, 'ideas', [{ name: 'sort', value: 'top' }]);
   check(replyOf(boardBack).includes('Kart racing mini-game'), 'restoring the switch brings /ideas straight back', replyOf(boardBack).slice(0, 100));
+
+  /* 17. the text fallback: `!memearcade <command>` answers when the slash
+        commands are not there yet (an hour of rollout, or an invite without the
+        applications.commands scope). It runs the same runCommand, obeys the same
+        switches, and DMs the private answers a message cannot mark ephemeral. */
+  const chan = (m) => m.channelId === 'chan-1';
+  const dmOf = (id) => (m) => m.channelId === `dm-${id}`;
+
+  // The parser on its own, before any round-trip.
+  check(parseTextCommand('good morning everyone') === null, 'a normal message is not a text command');
+  check(parseTextCommand('!memearcade').help === true && parseTextCommand('  !MEMEArcade help ').help === true,
+    'the bare prefix and help answer with the command list, whatever the case');
+  const keyedIdeas = parseTextCommand('!memearcade ideas sort:new category:game');
+  const keyedIdeasOpts = optionsToObject(keyedIdeas?.options || []);
+  check(keyedIdeas?.name === 'ideas' && keyedIdeasOpts.sort === 'new' && keyedIdeasOpts.category === 'game',
+    'name:value options are read', JSON.stringify(keyedIdeas));
+  const positionalIdeas = parseTextCommand('!memearcade ideas newest in progress games');
+  const positionalOpts = optionsToObject(positionalIdeas?.options || []);
+  check(positionalIdeas?.name === 'ideas' && positionalOpts.sort === 'new' && positionalOpts.status === 'in-progress' && positionalOpts.category === 'game',
+    'filters in any order are read, and "in progress" is one status', JSON.stringify(positionalIdeas));
+  const voted = parseTextCommand('!memearcade /vote #a1b2c3d4');
+  check(voted?.name === 'vote' && optionsToObject(voted.options).idea === 'a1b2c3d4',
+    'a vote reads the id with or without a #, and tolerates a typed slash', JSON.stringify(voted));
+  const named = parseTextCommand('!memearcade arcade some player name');
+  check(optionsToObject(named?.options || []).player === 'some player name',
+    'a player name keeps its spaces', JSON.stringify(named));
+  const lbText = parseTextCommand('!memearcade leaderboard wins ping pong');
+  const lbOpts = optionsToObject(lbText?.options || []);
+  check(lbOpts.sort === 'wins' && lbOpts.game === 'ping pong',
+    'a positional leaderboard reads the sort then the game', JSON.stringify(lbText));
+  const suggestText = parseTextCommand('!memearcade suggest Kart racing | A top-down racer. | game');
+  const suggestOpts = optionsToObject(suggestText?.options || []);
+  check(suggestOpts.title === 'Kart racing' && suggestOpts.details === 'A top-down racer.' && suggestOpts.category === 'game',
+    'suggest takes title | details | category', JSON.stringify(suggestText));
+  check(!!parseTextCommand('!memearcade suggest only a title')?.error,
+    'suggest without details explains the pipe syntax');
+  check(/not a command/.test(parseTextCommand('!memearcade nope')?.error || ''),
+    'an unknown command says so');
+  check(/not an idea filter/.test(parseTextCommand('!memearcade ideas nonsense')?.error || ''),
+    'an unknown idea filter says so');
+  const helpText = textCommandHelp();
+  check((registered || []).every((c) => helpText.includes(`${TEXT_PREFIX} ${c.name}`)),
+    'the help lists every registered command', helpText.slice(0, 80));
+  check(textFallbackHints('Run `/link` here, then `/arcade`.') === `Run \`${TEXT_PREFIX} link\` here, then \`${TEXT_PREFIX} arcade\`.`
+    && textFallbackHints('see /api/meta or a/b') === 'see /api/meta or a/b',
+    'slash hints in a reply become text commands, and other paths are left alone',
+    textFallbackHints('Run `/link` here, then `/arcade`.'));
+
+  // End to end through the fake gateway: a public answer lands in the channel,
+  // quoting the message that asked.
+  const ideasAsk = `m-${fake.seq++}`;
+  pushMessage(fanUser, '!memearcade ideas', ideasAsk);
+  const ideasText = await waitForChannelMessage((m) => chan(m) && m.body?.message_reference?.message_id === ideasAsk, 'the text ideas board');
+  check((ideasText.body?.content || '').includes('Kart racing mini-game'),
+    'a text command serves the same board the slash command does', (ideasText.body?.content || '').slice(0, 120));
+  check(JSON.stringify(ideasText.body?.allowed_mentions) === '{"parse":[]}',
+    'a text reply never pings anyone', JSON.stringify(ideasText.body?.allowed_mentions));
+
+  // A private answer cannot be ephemeral as a message, so it is a DM - and the
+  // channel must not see the stats or, later, a link code.
+  const privateAsk = `m-${fake.seq++}`;
+  pushMessage(fanUser, '!memearcade arcade player:ideafan', privateAsk);
+  const privateDm = await waitForChannelMessage(dmOf(fanUser.id), 'the private profile DM');
+  check(privateDm.body?.embeds?.[0]?.title === 'ideafan',
+    'a private text answer arrives as a DM', privateDm.body?.embeds?.[0]?.title || '(no embed)');
+  check(!fake.channelMessages.some((m) => chan(m) && m.body?.message_reference?.message_id === privateAsk),
+    'the private answer is not posted in the channel');
+
+  const helpAsk = `m-${fake.seq++}`;
+  pushMessage(fanUser, '!memearcade', helpAsk);
+  const helpReply = await waitForChannelMessage((m) => chan(m) && m.body?.message_reference?.message_id === helpAsk, 'the text help list');
+  check((helpReply.body?.content || '').includes(`${TEXT_PREFIX} suggest <title>`) && (helpReply.body?.content || '').includes(`${TEXT_PREFIX} vote`),
+    'the bare prefix answers with the copyable command list', (helpReply.body?.content || '').slice(0, 120));
+
+  // Silence is part of the contract: ordinary chatter and other bots' messages
+  // must not be answered.
+  const beforeQuiet = fake.channelMessages.length;
+  pushMessage(fanUser, 'good morning everyone', `m-${fake.seq++}`);
+  pushMessage({ ...fanUser, id: 'discord-other-bot', username: 'otherbot', bot: true }, '!memearcade ideas', `m-${fake.seq++}`);
+  await sleep(900);
+  check(fake.channelMessages.length === beforeQuiet, 'ordinary chat and other bots are left alone',
+    `${fake.channelMessages.length - beforeQuiet} unexpected replies`);
+
+  // A player whose privacy settings refuse DMs: the channel hears that the
+  // answer is private, never the answer itself (a link code would be a hijack).
+  const closedUser = { id: 'discord-closed-dms', username: 'nodms' };
+  fake.dmBlocked.add(closedUser.id);
+  const closedAsk = `m-${fake.seq++}`;
+  pushMessage(closedUser, '!memearcade link', closedAsk);
+  const closedNote = await waitForChannelMessage((m) => chan(m) && m.body?.message_reference?.message_id === closedAsk, 'the closed-DM notice');
+  check((closedNote.body?.content || '').includes('would not let me message you'),
+    'a refused DM explains itself in the channel', (closedNote.body?.content || '').slice(0, 120));
+  check(!(closedNote.body?.content || '').includes('Link your Discord account'),
+    'a refused DM never leaks the private reply or its link code', closedNote.body?.content || '');
+
+  // The linked account can vote and post through the fallback too.
+  const voteBoard = await arcade('GET', '/api/suggestions?status=all');
+  const voteTarget = (voteBoard.payload?.suggestions || []).find((s) => s.title === 'Kart racing mini-game');
+  if (voteTarget) {
+    const strangerUser = { id: 'discord-stranger-9', username: 'stranger' };
+    pushMessage(strangerUser, `!memearcade vote ${voteTarget.id.slice(0, 6)}`, `m-${fake.seq++}`);
+    const voteDm = await waitForChannelMessage(dmOf(strangerUser.id), 'the vote DM');
+    check(/Upvoted|Removed your vote/.test(voteDm.body?.content || ''),
+      'a text vote acts as the linked account and answers by DM', (voteDm.body?.content || '').slice(0, 100));
+
+    pushMessage(strangerUser, '!memearcade suggest Text fallback | A message-only idea for the bot check. | feature', `m-${fake.seq++}`);
+    const suggestDm = await waitForChannelMessage(
+      (m) => dmOf(strangerUser.id)(m) && (m.body?.content || '').includes('Posted to the idea board'),
+      'the suggest DM',
+    );
+    check((suggestDm.body?.content || '').includes(`${TEXT_PREFIX} ideas`) && !(suggestDm.body?.content || '').includes('`/ideas`'),
+      'the reply points at the text form of the command it names', (suggestDm.body?.content || '').slice(-120));
+    const postedBoard = await arcade('GET', '/api/suggestions?status=all');
+    check((postedBoard.payload?.suggestions || []).some((s) => s.title === 'Text fallback' && s.fromName === 'secondfan'),
+      'a text suggest posts to the real board as the linked account');
+  } else {
+    check(false, 'the text vote and suggest checks', 'the kart idea was not on the board');
+  }
+
+  const usageAsk = `m-${fake.seq++}`;
+  pushMessage(fanUser, '!memearcade vote', usageAsk);
+  const usageReply = await waitForChannelMessage((m) => chan(m) && m.body?.message_reference?.message_id === usageAsk, 'the usage hint');
+  check((usageReply.body?.content || '').includes('Pass an idea id'),
+    'a missing option is answered where it was typed, not DMed', (usageReply.body?.content || '').slice(0, 100));
 
   const errored = botLog.join('').includes('failed');
   check(!errored, 'the bot logged no command failures', botLog.filter((l) => l.includes('failed')).slice(0, 2).join(' | '));

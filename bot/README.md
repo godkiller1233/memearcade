@@ -2,7 +2,9 @@
 
 Turns the arcade's idea board and player stats into slash commands. No
 dependencies - it talks to Discord with the built-in `fetch`/`WebSocket`
-(Node 22+) and to the arcade with the `X-Bot-Token` shared secret.
+(Node 22+) and to the arcade with the `X-Bot-Token` shared secret. Every command
+also answers to a plain message (`!memearcade <command>`), so players are not
+stuck waiting for Discord to roll the slash commands out.
 
 ## Commands
 
@@ -23,6 +25,42 @@ up under your arcade name. Looking someone up (`/arcade player:name`,
 `/profile player:name`) needs no link at all - it reads the same public profile
 the website's player list shows, and a name that misses offers the closest
 matches.
+
+## Text fallback: `!memearcade <command>`
+
+Global slash commands can take up to an hour to appear, and they never appear at
+all if the bot was invited without the `applications.commands` scope. So every
+command also answers to a plain message, with the same validation, the same
+feature switches and the same linked account:
+
+| Message | Same as |
+| --- | --- |
+| `!memearcade` or `!memearcade help` | the full command list |
+| `!memearcade arcade ideafan` | `/arcade player:ideafan` |
+| `!memearcade profile` | `/profile` |
+| `!memearcade leaderboard wins ping pong` | `/leaderboard sort:wins game:ping pong` |
+| `!memearcade ideas status:open category:game` | `/ideas status:open category:game` |
+| `!memearcade changelog` | `/changelog` |
+| `!memearcade suggest title:Kart racing details:A top-down racer. category:game` | `/suggest title:… details:… category:game` |
+| `!memearcade vote a1b2c3` | `/vote idea:a1b2c3` |
+| `!memearcade link` | `/link` |
+
+Options can be written `name:value` in any order, or positionally in the order
+shown above (as with the leaderboard example). A value runs to the next known
+option, so `details:` may contain spaces. `suggest` also accepts
+`!memearcade suggest Kart racing | A top-down racer. | game` if you prefer pipes.
+
+A plain message has no ephemeral flag, so a private answer - your stats, a link
+code, a vote - is sent as a **DM**. If your privacy settings refuse DMs the bot
+posts a short note in the channel saying so, and the answer itself (and any link
+code in it) is never posted there. Public answers (`/ideas`, `/changelog`,
+`/leaderboard`) reply in the channel and quote the message that asked.
+
+Reading messages in a server needs Discord's privileged **Message Content
+Intent**: tick it under *Bot → Privileged Gateway Intents* in the Developer
+Portal. DMs carry their text without it, so the fallback still works there. If
+the intent is off, the bot says so in its log, reconnects without it and keeps
+the slash commands running - it does not go offline.
 
 ## Feature switches
 
@@ -48,7 +86,9 @@ reply - the bot can never be more open than the arcade.
 1. Create an application at <https://discord.com/developers/applications>, add a
    **Bot**, and copy its token.
 2. Invite it to your server with the `bot` and `applications.commands` scopes
-   (OAuth2 URL generator). No privileged intents are needed.
+   (OAuth2 URL generator). Slash commands need no privileged intents; the
+   `!memearcade` fallback in servers needs **Message Content Intent** (Bot →
+   Privileged Gateway Intents), and works in DMs without it.
 3. Start the arcade and open **Admin console -> 🤖 Discord bot** to copy the
    bot secret.
 4. `cp bot/.env.example bot/.env` and fill in `DISCORD_TOKEN` and
@@ -72,6 +112,15 @@ using the project's own WebSocket server), runs the real bot against it and
 drives `/arcade`, `/profile`, `/leaderboard`, `/ideas`, `/changelog`, `/suggest`,
 `/vote` and `/link`. It also closes features as the owner (idea board, changelog,
 leaderboards, one scheduled window) and asserts every affected command answers
-with the switch notice - and that a hidden feature still serves. It covers our
-side of the protocol without a Discord token; it does not test real Discord
-itself.
+with the switch notice - and that a hidden feature still serves.
+
+It drives the text fallback the same way: the parser's keyed and positional
+forms, the channel reply (quoting the message, never pinging), the DM for a
+private answer, the silence for ordinary chat and other bots, the refusal when a
+player's DMs are closed, and a vote and suggestion posted as the linked account.
+A second fake gateway closes the connection with 4014 unless the privileged
+intent is dropped, which proves the bot reconnects and keeps serving instead of
+dying on an unconfigured app.
+
+It covers our side of the protocol without a Discord token; it does not test
+real Discord itself.

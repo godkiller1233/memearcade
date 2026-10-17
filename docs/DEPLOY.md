@@ -126,6 +126,12 @@ stays stable across redeploys, which is exactly why it is set there: the
 Keep the bot off your public server's critical path - it can run on any machine
 that can reach the internet.
 
+Players can always type `!memearcade <command>` instead of waiting for the slash
+commands to roll out. That fallback reads channel messages, so tick **Message
+Content Intent** under the application's *Bot → Privileged Gateway Intents*.
+Without it the bot logs the missing switch, reconnects without the intent and
+keeps the slash commands (and DMs) working - it never goes offline over it.
+
 ---
 
 ## Paid upgrades (optional)

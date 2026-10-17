@@ -9,13 +9,19 @@
  * /link. Posting and voting use the linked account's session, obtained through
  * the server's /api/bot/link flow.
  * It also answers autocomplete for /leaderboard game: from the live catalog.
+ *
+ * Slash commands can take up to an hour to appear, and never do when the invite
+ * was made without the applications.commands scope - so every command also
+ * answers to a message: `!memearcade <command>` (see parseTextCommand).  Public
+ * answers land in the channel; private ones (your stats, a link code, a vote)
+ * are DMed, because a text reply has no ephemeral flag.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Arcade } from './arcade.js';
-import { DiscordRest, DiscordGateway } from './discord.js';
-import { COMMAND_DEFINITIONS, FeatureGate, LinkStore, PUBLIC_COMMANDS, autocomplete, describeSwitches, runCommand } from './commands.js';
+import { DiscordRest, DiscordGateway, FULL_INTENTS } from './discord.js';
+import { COMMAND_DEFINITIONS, FeatureGate, LinkStore, PUBLIC_COMMANDS, TEXT_PREFIX, autocomplete, describeSwitches, parseTextCommand, runCommand, textCommandHelp, textFallbackHints } from './commands.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -152,16 +158,95 @@ async function main() {
     }
   }
 
+  /** The reply shape both paths share: text first, embeds beside it when a command has them. */
+  const messagePayload = (content, embeds, extra = {}) => {
+    const payload = { content: String(content || '').slice(0, 1990), allowed_mentions: { parse: [] }, ...extra };
+    if (embeds?.length) payload.embeds = embeds;
+    return payload;
+  };
+
+  /** Quote the triggering message where Discord allows it, so a busy channel keeps context. */
+  const reference = (message) =>
+    message?.id ? { message_id: message.id, fail_if_not_exists: false } : undefined;
+
+  /**
+   * A private answer has no ephemeral flag on a message, so it goes to a DM.
+   * If the player's privacy settings reject DMs the content is withheld - a
+   * link code or another account's stats must never land in the channel - and
+   * the channel only hears that the DM could not be delivered.
+   */
+  async function sendPrivate(user, payload, channelId, message) {
+    try {
+      const dm = await rest.createDmChannel(user.id);
+      if (!dm?.id) throw new Error('Discord returned no DM channel');
+      await rest.createMessage(dm.id, payload);
+      return true;
+    } catch (err) {
+      log(`${TEXT_PREFIX} DM to ${user.username || user.id} could not be sent: ${err.message}`);
+      const note = '📬 **That answer is private, so it goes by DM** - but Discord would not let me message you. Allow direct messages from server members in your privacy settings, then try again.';
+      await rest.createMessage(channelId, messagePayload(note, null, { message_reference: reference(message) })).catch(() => {});
+      return false;
+    }
+  }
+
+  /**
+   * The text fallback: `!memearcade <command> [options]`.  Everything after the
+   * parse is the same runCommand the interactions use, so the feature switches,
+   * the link checks and the validation are shared.
+   */
+  async function handleMessageCreate(message) {
+    if (!message || message.author?.bot || message.webhook_id) return;
+    const parsed = parseTextCommand(message.content);
+    if (!parsed) return;
+    const channelId = message.channel_id;
+    const user = {
+      id: message.author?.id,
+      username: message.author?.username,
+      global_name: message.author?.global_name,
+    };
+    if (!channelId || !user.id) return;
+    const who = user.username || 'someone';
+
+    try {
+      if (parsed.help) {
+        await rest.createMessage(channelId, messagePayload(textCommandHelp(), null, { message_reference: reference(message) }));
+        log(`${TEXT_PREFIX} help by ${who}`);
+        return;
+      }
+      if (parsed.error) {
+        // A typo is answered where it was typed, never DMed.
+        await rest.createMessage(channelId, messagePayload(parsed.error, null, { message_reference: reference(message) }));
+        log(`${TEXT_PREFIX} usage error by ${who}: ${parsed.error.slice(0, 80)}`);
+        return;
+      }
+
+      const reply = await runCommand(parsed.name, parsed.options, { arcade, links, user, features, log });
+      const payload = messagePayload(textFallbackHints(reply.content), reply.embeds, reply.ephemeral ? {} : { message_reference: reference(message) });
+      if (reply.ephemeral) await sendPrivate(user, payload, channelId, message);
+      else await rest.createMessage(channelId, payload);
+      log(`${TEXT_PREFIX} ${parsed.name} by ${who}`);
+    } catch (err) {
+      log(`${TEXT_PREFIX} ${parsed.name || 'command'} failed: ${err.message}`);
+      await rest
+        .createMessage(channelId, messagePayload(`⚠️ ${err.message || 'Something went wrong.'}`, null, { message_reference: reference(message) }))
+        .catch(() => {});
+    }
+  }
+
   const gateway = new DiscordGateway({
     token: config.discordToken,
+    // MESSAGE_CONTENT is privileged; the gateway drops it (and says so) when
+    // the Developer Portal has not enabled it, rather than going offline.
+    intents: FULL_INTENTS,
     gatewayUrl: async () => config.gatewayUrl || (await rest.gateway()).url,
     onDispatch: (type, data) => {
       if (type === 'INTERACTION_CREATE') handleInteraction(data);
+      else if (type === 'MESSAGE_CREATE') handleMessageCreate(data);
     },
     log,
   });
   gateway.start();
-  log('listening for slash commands - press Ctrl+C to stop');
+  log(`listening for slash commands and ${TEXT_PREFIX} text commands - press Ctrl+C to stop`);
 
   const shutdown = () => {
     log('shutting down');

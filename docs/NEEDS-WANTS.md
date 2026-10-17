@@ -110,6 +110,41 @@ Three things changed:
   and clears it with "streaming again" the moment snapshots resume.  A new
   `.room-alert.stream` banner carries both lines to every seat.
 
+## Built on request: a text fallback for every Discord command
+
+**The Discord bot was slash-command only, so it was invisible until Discord
+finished rolling them out.**  Global commands can take an hour to appear, and
+they never appear at all when the invite went out without the
+`applications.commands` scope - a player with no `/` menu had no way in.
+
+Every command now also answers to a plain message: **`!memearcade <command>`**.
+
+- **One parser, one handler.**  `parseTextCommand` turns the message into the
+  same option objects an interaction carries, so `runCommand`, the feature
+  switches and the validation are shared.  Options can be `name:value`
+  (`!memearcade ideas status:open category:game`) or positional
+  (`!memearcade vote a1b2c3`); `suggest` takes `title | details | category`, and
+  `!memearcade help` lists every command with a copyable form.
+- **Private stays private.**  A plain message has no ephemeral flag, so the
+  answers the slash commands mark private (your stats, a link code, a vote) are
+  DMed.  If the player's privacy settings refuse DMs the channel only hears that
+  the answer was private - a link code is never posted there.  Public answers
+  land in the channel, quoting the message that asked, with mentions off.
+- **Replies keep working.**  A reply written for slash commands (`Run /link`,
+  `Vote with /vote`) is rewritten to the text form on the way out, so the next
+  step in the answer is never a dead end.
+- **It cannot break the bot.**  In servers, reading message text needs Discord's
+  privileged Message Content intent.  The gateway asks for it, and if the app has
+  never enabled it Discord answers 4014 - so the bot drops that one bit, says so
+  in the log, reconnects, and keeps slash commands and DMs working instead of
+  going offline.
+
+`npm run botcheck` grew from 151 to 180 checks: the parser's keyed and
+positional forms, the quoting channel reply, the private DM, the silence for
+ordinary chat and other bots, the refused-DM note with no leaked code, a vote and
+a suggestion posted as the linked account, and a second fake gateway that
+refuses the privileged intent until the bot retries without it.
+
 ## Wanted next (not done)
 
 - **Friends: party invites have no lasting home.** A missed toast is gone for
