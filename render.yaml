@@ -63,6 +63,14 @@ services:
         sync: false
       - key: MEMES_ADMIN_USER
         value: memegodmidas
+      # The Discord bot's token: Developer Portal -> your application -> Bot ->
+      # Reset Token. The value can never live in this file (`sync: false`), so
+      # Render asks for it on the first Blueprint apply; on a service that
+      # already exists, add it under Environment. Without it the site runs
+      # perfectly and the bot stays off - /api/health reports exactly that as
+      # `"bot":{"running":false,"reason":"no DISCORD_TOKEN ..."}`.
+      - key: DISCORD_TOKEN
+        sync: false
       # Keeps the Discord bot's shared secret stable across redeploys, because
       # data/bot-secret.txt is wiped. The site starts the bot itself when
       # DISCORD_TOKEN is set on this service; to run the bot on your own PC
