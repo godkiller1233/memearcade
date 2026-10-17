@@ -232,6 +232,49 @@ Content Intent** under the application's *Bot → Privileged Gateway Intents*.
 Without it the bot logs the missing switch, reconnects without the intent and
 keeps the slash commands (and DMs) working - it never goes offline over it.
 
+### Keep the free arcade awake (so the bot stays online)
+
+A free instance spins down after **15 minutes with no inbound HTTP traffic**, and
+the Discord bot lives in that process - so a sleeping arcade is an offline bot.
+Render's own health checks and the bot's outbound WebSocket do not count as
+activity; an external request is what keeps it up.
+
+**What it costs.** Free web services share **750 instance hours per workspace per
+month**, and only running time counts. One always-awake service fits: 720 h in a
+30-day month, 744 h in a 31-day month. Anything else free in the same workspace
+shares the same 750, and exhausting them **suspends every free web service until
+the next month** (the allowance resets; Render does not bill the overage). If
+that trade is not worth it, run the bot at home instead with
+`MEMES_BOT_AUTOSTART=off` (see "The Discord bot" above).
+
+**The ping.** The server has a route for exactly this - public, reads nothing
+from the store and is never cached:
+
+```
+https://<service-name>.onrender.com/api/ping     ->  {"ok":true,"pong":true,"at":...}
+```
+
+**Setup (Better Stack, free):** create an account, add an **HTTP monitor** with
+that URL, method **GET**, interval **3 minutes** (the free cadence), and treat
+**2xx as up**. Check the Render logs once to see the requests arriving. Do not
+ping `/robots.txt` - Render answers that one itself while a service is asleep,
+so it neither wakes it nor counts.
+
+Alternatives, with their catches:
+
+| Pinger | Free cadence | Catch |
+|---|---|---|
+| **Better Stack** | 3 minutes, 10 monitors | Best margin; no punctuality guarantee |
+| **UptimeRobot** | 5 minutes, 50 monitors | No margin against a 15-minute window, and its HTTP monitors default to **HEAD** - choose GET |
+| **cron-job.org** | every minute | Its own FAQ disclaims punctuality and mentions deliberate delays |
+| **Cloudflare Worker** (cron trigger) | every minute | You own the schedule and the code; needs a Cloudflare account and a tiny deploy |
+| **GitHub Actions** (`schedule:`) | 5 minutes | Not dependable: GitHub documents delayed and dropped scheduled runs, and disables schedules after 60 days of repo inactivity |
+
+No free monitor promises punctuality, so treat this as *much less likely to
+sleep*, not as a guarantee: a late or dropped check lets the service spin down,
+and the next check wakes it about a minute later. When it does sleep, the bot
+reconnects on its own and the server list catches up on the next report.
+
 ---
 
 ## Paid upgrades (optional)

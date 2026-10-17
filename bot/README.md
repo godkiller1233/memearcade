@@ -133,6 +133,11 @@ the banner and the server log say why.
 - **Turn it off** with `MEMES_BOT_AUTOSTART=off` in the site's environment or
   `bot/.env` when the bot runs somewhere else (another PC, a background worker).
   Two copies both answer interactions, so this is the switch to use.
+- **A sleeping site is a sleeping bot.** On a hosted free instance the service
+  spins down after 15 idle minutes and the bot goes with it. Point a free uptime
+  monitor at `/api/ping` every few minutes to keep it awake - see docs/DEPLOY.md
+  ("Keep the free arcade awake") for the cadences, the 750-hour budget and the
+  trade-off.
 - **It says why it is off.** `/api/health` reports the process, not just the
   last server list: `"bot":{"running":true,"reason":"started with the site"}`,
   or the reason instead - no token, `MEMES_BOT_AUTOSTART=off`, `exited with code

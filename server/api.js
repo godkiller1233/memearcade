@@ -335,6 +335,18 @@ export function registerApi(app, { rooms, hub, bot = null }) {
   }));
 
   /**
+   * The keep-awake probe. A free Render instance spins down after 15 minutes
+   * without inbound HTTP traffic, and neither Render's own health checks nor
+   * the bot's outbound WebSocket counts - so an external monitor pointed here
+   * is what keeps the arcade (and with it the bot) online.
+   *
+   * Deliberately the cheapest route in the server: no store read, no presence,
+   * no session, and a `no-store` response (`send()` sets it) so a three-minute
+   * ping can never be answered from a cache. Setup: docs/DEPLOY.md.
+   */
+  app.get('/api/ping', () => ({ ok: true, pong: true, at: now() }));
+
+  /**
    * The build the server is serving, on its own so a watching client can ask
    * cheaply and often (no catalog, no negotiation).  `send()` is already
    * `no-store`, so a proxy can never answer this with a stale stamp.  The same

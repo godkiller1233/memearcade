@@ -109,7 +109,11 @@ async function handle(app, req, res) {
   const isApi = pathname.startsWith('/api/');
 
   for (const route of app.routes) {
-    if (route.method !== req.method) continue;
+    // HEAD is a GET without a body, and Node drops the body itself. Uptime
+    // monitors (UptimeRobot's HTTP checks by default) and `curl -I` use it, so
+    // a keep-awake probe must not 404 just because it asked with HEAD.
+    const methodMatches = route.method === req.method || (req.method === 'HEAD' && route.method === 'GET');
+    if (!methodMatches) continue;
     const m = route.rx.exec(pathname);
     if (!m) continue;
     const params = {};

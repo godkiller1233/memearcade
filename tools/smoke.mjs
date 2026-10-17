@@ -240,6 +240,15 @@ async function run() {
   const health = await api('GET', '/api/health');
   check(health.ok && health.payload?.ok === true, '/api/health reports healthy', `status ${health.status}`);
   check(Number.isFinite(health.payload?.engines), 'health reports an engine count', String(health.payload?.engines));
+  // What an external keep-awake monitor hits: public, store-free and cacheless.
+  const ping = await api('GET', '/api/ping');
+  check(ping.ok && ping.payload?.pong === true, '/api/ping answers a keep-awake monitor', `status ${ping.status}`);
+  check(/no-store/.test(ping.headers.get('cache-control') || ''), 'the keep-awake answer is never cached',
+    ping.headers.get('cache-control') || '(no cache-control)');
+  // UptimeRobot's HTTP monitors ask with HEAD by default; a 404 there would read
+  // as "the arcade is down" while it is perfectly awake.
+  const pingHead = await api('HEAD', '/api/ping');
+  check(pingHead.status === 200, 'the keep-awake probe answers HEAD like GET', `status ${pingHead.status}`);
 
   const meta = await api('GET', '/api/meta');
   check(meta.ok, '/api/meta answers', `status ${meta.status}`);
