@@ -116,6 +116,13 @@ export const COMMAND_DEFINITIONS = [
     name: 'link',
     description: 'Link your Discord account so you can post and vote as yourself',
   },
+  {
+    // The discovery path: `/` and `!memearcade` are two ways in, and this is
+    // the command that says so. Built from COMMAND_DEFINITIONS below, so it can
+    // never list a command that is not registered (or miss a new one).
+    name: 'help',
+    description: 'Every command, and how to use them without slash commands',
+  },
 ];
 
 /** Keeps the linked-account tokens the bot uses for player-bound calls. */
@@ -158,7 +165,7 @@ export class LinkStore {
  * ------------------------------------------------------------------ */
 
 /** Commands whose replies land in the channel; the rest answer privately. */
-export const PUBLIC_COMMANDS = new Set(['ideas', 'changelog', 'leaderboard']);
+export const PUBLIC_COMMANDS = new Set(['ideas', 'changelog', 'leaderboard', 'help']);
 
 /** Which switch each command needs; a command that is not listed needs none. */
 export const COMMAND_FEATURE = {
@@ -533,6 +540,8 @@ export async function runCommand(name, rawOptions, ctx) {
     if (flag) return featureOffReply(needed, flag, { ephemeral: !PUBLIC_COMMANDS.has(name) });
   }
 
+  if (name === 'help') return { content: commandHelp(), ephemeral: false };
+
   if (name === 'ideas') {
     const sort = options.sort === 'new' ? 'new' : 'top';
     const status = options.status || 'all';
@@ -730,19 +739,50 @@ export function textUsage(name) {
   return [TEXT_PREFIX, def.name, ...args].join(' ');
 }
 
+/** The slash form of one command, from the same definition Discord gets. */
+function slashUsage(def) {
+  const args = (def.options || []).map((o) => (o.required ? `<${o.name}>` : `[${o.name}]`));
+  return [`/${def.name}`, ...args].join(' ');
+}
+
 /**
- * Every command as a line a player can copy, plus the two syntaxes the parser
- * accepts.  Built from COMMAND_DEFINITIONS so a new slash command shows up here
- * without a second edit.
+ * The command list behind both entry points: `/help` and `!memearcade help`.
+ * Both walk COMMAND_DEFINITIONS, so a new command appears in each of them
+ * without a second edit, and the two lists can never disagree about what the
+ * bot can do - only about how a player has to type it.
+ *
+ * The pointer at the bottom is the point of the command: a player whose `/`
+ * menu has not rolled out yet learns the fallback from the command they can
+ * reach, and a player who types `!memearcade help` learns the slash forms.
  */
+export function commandHelp({ text = false } = {}) {
+  const lines = COMMAND_DEFINITIONS.map((def) => {
+    const usage = text ? textUsage(def.name) : slashUsage(def);
+    return `• \`${usage}\` — ${def.description}`;
+  });
+  const head = text
+    ? `📖 **Arcade commands by message** - \`${TEXT_PREFIX} <command>\` works even when slash commands are not showing up yet.`
+    : '📖 **Memes Arcade commands**';
+  const tail = text
+    ? [
+        '',
+        'Options can be written `name:value` (`!memearcade ideas status:open category:game`), or in the order shown (`!memearcade vote a1b2c3d4`).',
+        'Private answers - your stats, a link code, a vote - arrive as a DM, the same ones the slash commands answer privately.',
+        'The same commands sit in the slash menu too - both paths share the same board and the same linked account.',
+      ]
+    : [
+        '',
+        `**Prefer plain messages, or waiting on Discord's rollout?** Every command also answers to \`${TEXT_PREFIX} <command>\`.`,
+        `Try \`${TEXT_PREFIX} arcade ideafan\`, or \`${TEXT_PREFIX} help\` for the text forms.`,
+        'Options can be written `name:value` (`/ideas status:open category:game`), or in the order shown (`/vote a1b2c3d4`).',
+        'Private answers - your stats, a link code, a vote - arrive only to you.',
+      ];
+  return [head, ...lines, ...tail].join('\n');
+}
+
+/** The same list in its message form: every command as a line a player can copy. */
 export function textCommandHelp() {
-  return [
-    `📖 **Text commands** - \`${TEXT_PREFIX} <command>\` works even when slash commands are not showing up yet.`,
-    ...COMMAND_DEFINITIONS.map((def) => `• \`${textUsage(def.name)}\` — ${def.description}`),
-    '',
-    'Options can be written `name:value` (`!memearcade ideas status:open category:game`), or in the order shown (`!memearcade vote a1b2c3d4`).',
-    'Private answers - your stats, a link code, a vote - arrive as a DM, the same ones the slash commands answer privately.',
-  ].join('\n');
+  return commandHelp({ text: true });
 }
 
 /**

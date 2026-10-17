@@ -130,6 +130,12 @@ Every command now also answers to a plain message: **`!memearcade <command>`**.
   DMed.  If the player's privacy settings refuse DMs the channel only hears that
   the answer was private - a link code is never posted there.  Public answers
   land in the channel, quoting the message that asked, with mentions off.
+- **Both doors point at each other.**  `/help` is a real slash command: it lists
+  every command with the arguments it takes, and says that each one also answers
+  to `!memearcade <command>` with a copyable example.  `!memearcade help` renders
+  the same list in message form.  Both walk the registered definitions, so a new
+  command cannot show up in one list and be missing from the other - and the
+  message list never sends a player to a `/` command that may not be there yet.
 - **Replies keep working.**  A reply written for slash commands (`Run /link`,
   `Vote with /vote`) is rewritten to the text form on the way out, so the next
   step in the answer is never a dead end.
@@ -139,11 +145,12 @@ Every command now also answers to a plain message: **`!memearcade <command>`**.
   in the log, reconnects, and keeps slash commands and DMs working instead of
   going offline.
 
-`npm run botcheck` grew from 151 to 180 checks: the parser's keyed and
+`npm run botcheck` grew from 151 to 190 checks: the parser's keyed and
 positional forms, the quoting channel reply, the private DM, the silence for
 ordinary chat and other bots, the refused-DM note with no leaked code, a vote and
-a suggestion posted as the linked account, and a second fake gateway that
-refuses the privileged intent until the bot retries without it.
+a suggestion posted as the linked account, a second fake gateway that refuses the
+privileged intent until the bot retries without it, and the two help listings
+(one renderer, no command missing, no truncated message).
 
 ## Wanted next (not done)
 

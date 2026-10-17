@@ -481,7 +481,9 @@ async function run() {
   /* 1. the bot registers its commands */
   const registered = await waitFor(() => fake.commands, 10000, 'command registration');
   const names = (registered || []).map((c) => c.name).sort();
-  check(JSON.stringify(names) === JSON.stringify(['arcade', 'changelog', 'ideas', 'leaderboard', 'link', 'profile', 'suggest', 'vote']), 'the bot registers all eight commands', names.join(', '));
+  check(JSON.stringify(names) === JSON.stringify(['arcade', 'changelog', 'help', 'ideas', 'leaderboard', 'link', 'profile', 'suggest', 'vote']), 'the bot registers all nine commands', names.join(', '));
+  const helpDef = (registered || []).find((c) => c.name === 'help');
+  check(!!helpDef && !helpDef.options?.length, '/help is registered and takes no options', JSON.stringify(helpDef));
   const changelogDef = (registered || []).find((c) => c.name === 'changelog');
   check(!changelogDef?.options?.length, '/changelog takes no options', JSON.stringify(changelogDef?.options));
   const suggest = (registered || []).find((c) => c.name === 'suggest');
@@ -994,6 +996,34 @@ async function run() {
   } else {
     check(false, 'the live-role ping checks', 'the moderator or poster account above was not ready');
   }
+
+  /* 15b. /help is the discovery path for both entries: it lists every command
+         straight from the registration, and it tells a player whose `/` menu is
+         still empty that the same commands answer as messages. It needs no link
+         and no switches, and it must fit in one Discord message whole. */
+  const helperUser = { id: 'discord-helper-7', username: 'helper' };
+  const slashHelp = await interact(helperUser, 'help');
+  const helpBody = slashHelp.message?.content || '';
+  check(slashHelp.callback?.data?.flags === undefined && !!helpBody,
+    '/help answers in the channel, not privately', JSON.stringify(slashHelp.callback?.data));
+  check((registered || []).every((c) => helpBody.includes(`/${c.name}`)),
+    '/help lists every registered command', helpBody.slice(0, 140));
+  check(helpBody.includes(`${TEXT_PREFIX} <command>`) && helpBody.includes(`${TEXT_PREFIX} arcade ideafan`),
+    "/help advertises the text fallback with a concrete example", helpBody.slice(-220));
+  check(helpBody.includes('`/suggest <title> <details> [category]`'),
+    '/help shows which arguments a command needs', helpBody.slice(0, 200));
+  check(helpBody.length < 1990, 'the whole command list fits in one message', `${helpBody.length} chars`);
+  check(!helpBody.includes('Link your account first'),
+    '/help needs no linked account', helpBody.slice(0, 120));
+  check(JSON.stringify(slashHelp.message?.allowed_mentions) === '{"parse":[]}',
+    '/help never pings anyone', JSON.stringify(slashHelp.message?.allowed_mentions));
+  // One renderer, two forms: the message list names the very same commands.
+  const helpAsText = textCommandHelp();
+  check((registered || []).every((c) => helpAsText.includes(`• \`${TEXT_PREFIX} ${c.name}`)),
+    'the message form lists the same commands as /help', helpAsText.slice(0, 140));
+  check(!helpAsText.includes('/help') && helpAsText.includes(`${TEXT_PREFIX} help`),
+    'the message form points at itself, never at a slash command that may be missing',
+    helpAsText.slice(-200));
 
   /* 16. feature switches: the bot is not a second door around a switch. The
         owner closes the idea board and every board command announces it; a

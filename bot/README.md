@@ -18,6 +18,7 @@ stuck waiting for Discord to roll the slash commands out.
 | `/suggest title: details: category:` | Post an idea as your linked arcade account. |
 | `/vote idea:` | Upvote / unvote an idea (accepts a short id prefix from `/ideas`). |
 | `/link` | Connect your Discord account to your arcade account. |
+| `/help` | Every command with its arguments, plus how to use them as plain messages (`!memearcade <command>`) when the slash commands have not appeared yet. Answers in the channel, needs no link. |
 
 Stats, posting and voting act as *you*: the bot asks the server for a 7-day
 session token tied to your linked account, so your level, coins and ideas show
@@ -32,6 +33,9 @@ Global slash commands can take up to an hour to appear, and they never appear at
 all if the bot was invited without the `applications.commands` scope. So every
 command also answers to a plain message, with the same validation, the same
 feature switches and the same linked account:
+
+`/help` shows the same list from the slash side, with each command's arguments
+and a concrete `!memearcade` example, so either entry point leads to the other.
 
 | Message | Same as |
 | --- | --- |
