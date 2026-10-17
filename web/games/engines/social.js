@@ -786,7 +786,21 @@ export const codenames = {
         }
       } else {
         events.push(U.event(`"${cell.word}" is not yours - turn passes.`, 'warn'));
-        endCodeTurn(state, events);
+        // A word belongs to a team whoever turns it over, so a mistake can find
+        // the other team's last agent. That is their win - and without this the
+        // game would carry on with a spymaster who has nothing left to clue.
+        const owner = cell.color;
+        const ownerLeft = state.grid.filter((c) => c.color === owner && !c.revealed).length;
+        if (!ownerLeft) {
+          state.winnerId = state.teams[owner].slice();
+          state.summary = `${U.byId(state, playerId)?.name} turned over ${owner.toUpperCase()}'s last agent - ${owner.toUpperCase()} wins!`;
+          events.push(U.event(state.summary, 'win'));
+          for (const id of state.winnerId) U.addScore(state, id, 1);
+          state.phase = 'reveal';
+          state.ready = [];
+        } else {
+          endCodeTurn(state, events);
+        }
       }
       for (const e of events) U.addLog(state, e.text, e.kind);
       return { ok: true, events };

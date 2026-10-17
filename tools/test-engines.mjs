@@ -168,6 +168,27 @@ for (const { file, engine, meta } of targets) {
         const holds = margin > 0 && winners.every((id) => booked[id] === margin) && losers.every((s) => (booked[s.id] || 0) === 0);
         if (!holds) throw new Error(`pong did not book the margin of victory: scores ${JSON.stringify(booked)} for ${JSON.stringify(res.state?.score)}`);
       }
+      // Codenames: a word belongs to a team even when the other team turns it
+      // over, so their last agent found by a mistake is their win. The sim used
+      // to stall here - the losing team was left with nothing to clue.
+      if (meta.id === 'codenames') {
+        const seats4 = makeSeats(4);
+        const s = engine.create({ players: seats4, seed: 11, rng: () => 0.42 });
+        engine.act(s, s.spymasters.a, { type: 'clue', word: 'ZEBRA', count: 1 });
+        const aCards = s.grid.filter((c) => c.color === 'a');
+        for (const c of aCards.slice(0, -1)) c.revealed = true;
+        const last = aCards[aCards.length - 1];
+        s.team = 'b';
+        s.phase = 'guess';
+        s.clue = { word: 'x', count: 1, team: 'b', by: s.spymasters.b };
+        const agentB = s.teams.b.find((id) => id !== s.spymasters.b);
+        const res2 = engine.act(s, agentB, { type: 'guess', word: last.word });
+        const over = engine.over(s);
+        const winners = over.winners || [];
+        if (res2?.ok !== true || !winners.length || winners.some((id) => !s.teams.a.includes(id)) || winners.length !== s.teams.a.length) {
+          throw new Error(`codenames: the other team revealing the last agent did not win it (${over.summary || 'no summary'})`);
+        }
+      }
       if (meta.secret && count > 1 && !res.viewsDiffer && meta.id !== 'battleship') {
         // some secret games legitimately look identical early; warn only
         if (VERBOSE) console.log(`    note: ${meta.id} views identical in a ${count}p match`);
