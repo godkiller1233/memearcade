@@ -1,7 +1,9 @@
 # Deploying Memes Arcade
 
-The project is **zero-dependency**: there is no build step, no bundler and no
-`npm install`. Anywhere Node 18+ runs, `npm start` runs the arcade.
+There is no build step and no bundler. The only runtime dependency is
+[`pg`](https://www.npmjs.com/package/pg), and only when a `DATABASE_URL` is
+set - without one the arcade still runs from a JSON file with nothing to
+install. `npm install` fetches `pg` for a hosted deploy.
 
 ---
 
@@ -9,8 +11,10 @@ The project is **zero-dependency**: there is no build step, no bundler and no
 
 The whole arcade - API, website and WebSockets - is **one Node web service**,
 and one free instance runs it. `render.yaml` in the repo root is a Render
-Blueprint: Render reads it and creates the service with the right start command,
-health check and environment variables. It asks for nothing paid.
+Blueprint: Render reads it and creates the service plus a Free Postgres
+database, with the right start command, health check and environment
+variables. It asks for nothing paid, but see **the 30-day database** below:
+Free Postgres is a trial, not a permanent home.
 
 ### 1. Get the project into its own repository
 
@@ -43,18 +47,27 @@ the only way back into your own account.
 | Free, and used here | Paid, and avoided here |
 |---|---|
 | One Node web service: 0.1 CPU / 512 MB | Persistent disk - so `data/` is ephemeral |
+| One Free Postgres: 1 GB, **expires after 30 days** | Keeping that database past 30 days (~$6/mo) |
 | Matches over WebSockets, custom domains, TLS | Background worker (the Discord bot) |
 | 750 instance hours per workspace per month | A second always-awake service (2 × 730 h) |
 | Auto-deploy on every commit | Scaling past one instance, SSH shell |
 
-Two free-tier behaviours decide how the arcade feels:
+Three free-tier behaviours decide how the arcade feels:
 
 - **It sleeps.** 15 minutes with no request and the service spins down; the next
   visitor waits about a minute for it to wake. Rooms, parties and matches live
   in the process's memory, so a woken server is a fresh one.
-- **Its disk is wiped on every deploy, restart and spin-down.** Accounts and
-  saves reset. Keep `MEMES_ADMIN_PASS` set so your own account always returns -
-  friends can re-register, or you can attach a disk on a paid instance (below).
+- **Its disk is wiped on every deploy, restart and spin-down.** Logs, saved
+  games and `data/ADMIN-CREDENTIALS.txt` reset with it. Accounts, ideas, rooms
+  and the bot's server memory live in Postgres instead - keep
+  `MEMES_ADMIN_PASS` set, because the credentials file does not survive.
+- **The database is a 30-day trial.** Render gives one Free Postgres per
+  workspace. It is deleted 14 days after its 30-day expiry unless you upgrade
+  it in the dashboard (Instances → the database → change plan, about $6/mo for
+  `0.1c-256mb` with a 1 GB disk). If it disappears the arcade still starts: it
+  logs that Postgres was unreachable, serves from the ephemeral file, and
+  `/api/health` says `"store":"file-fallback"`. Upgrade before the date, not
+  after.
 - **Some Blueprint fields are refused outright.** `maxShutdownDelaySeconds` is
   rejected with "max shutdown delay is not supported for free tier services" -
   the published schema allows the field, so it only fails at apply time and the
@@ -65,18 +78,52 @@ Two free-tier behaviours decide how the arcade feels:
 Render's own docs say free instances are for hobby projects - which is exactly
 what this is.
 
+### Where the data lives
+
+There are no migrations to run: the whole store is one JSONB row in
+`memes_arcade_store` (id `db`), created on first boot. That is deliberate - every
+store call reads one in-memory tree synchronously, so keeping the document
+intact makes accounts, parties, ideas and the bot's server memory durable
+without turning every engine's save path into async code.
+
+- **Hosted:** `DATABASE_URL` comes from the Blueprint's database and
+  `/api/health` returns `"store":"postgres"`. Writes are debounced and
+  serialised: a busy room is one upsert about every 1.2s, never one per action,
+  and the last change is flushed on shutdown.
+- **Local, no database:** leave `DATABASE_URL` unset and the store is
+  `data/db.json` (atomic temp + rename, previous file kept as backup), exactly
+  as before - what `npm start`, the desktop launcher and every check suite use.
+- **Local, with a database:** `MEMES_DATABASE_URL=postgres://... npm start`. An
+  empty database imports the existing `data/db.json` once on first boot.
+- **Fallback:** a database that cannot be reached is logged, the server stays up
+  on the file and reports `"store":"file-fallback"`; the next boot with a
+  working URL reads the database again.
+
+Inspect it in the Render shell or with `psql`:
+
+```sql
+SELECT revision, updated_at, pg_size_pretty(pg_total_relation_size('memes_arcade_store'))
+FROM memes_arcade_store WHERE id = 'db';
+```
+
+`npm run dbcheck` proves both backends without a server: the file seed / write /
+reload and backup fallback, the create / select / upsert SQL, serialised writes,
+the flush on close, and the unreachable-database fallback.
+
 ### 4. Check the blueprint before you push
 
 ```bash
 npm run blueprintcheck
 ```
 
-It parses `render.yaml` and proves every service in it is legal on the free plan
-(web service, `plan: free`, no disk, no autoscaling, no database, one instance,
-no field Render refuses on a free instance), then checks the build/start
-commands, the health path and every environment variable against the code. It runs in CI *and* inside the Blueprint's own build
-command, so a change that starts asking for paid resources fails the deploy
-instead of the billing page.
+It parses `render.yaml` and proves everything in it is legal on the free plan
+(web service with `plan: free`, no disk, no autoscaling, one instance, no field
+Render refuses on a free instance, and at most one database, which must be
+`plan: free` and no larger than 1 GB), then checks the build/start commands, the
+health path, that the database is actually handed to the service, and every
+environment variable against the code. It runs in CI *and* inside the
+Blueprint's own build command, so a change that starts asking for paid resources
+fails the deploy instead of the billing page.
 
 ### 5. Open it
 
@@ -248,7 +295,7 @@ Then set `MEMES_PUBLIC_URL` to the tunnel URL so invite links point at it.
 ## Verifying a deployment
 
 ```bash
-curl https://your-arcade.onrender.com/api/health     # {"ok":true,...}
+curl https://your-arcade.onrender.com/api/health     # {"ok":true,"store":"postgres",...}
 curl https://your-arcade.onrender.com/api/meta       # version + catalog
 npm run smoke -- https://your-arcade.onrender.com    # full check
 ```
@@ -265,6 +312,7 @@ request wakes it, so give the first call a minute.
 - [ ] `MEMES_REGISTRATIONS=closed` once everyone has an account
 - [ ] `MEMES_ADMIN_TOKEN` set if the server is genuinely public
 - [ ] `MEMES_CORS_ORIGINS` restricted to your domain
-- [ ] `data/` on a persistent disk, or accept resets on deploy and spin-down
+- [ ] `/api/health` reports `"store":"postgres"` (not `file-fallback`)
+- [ ] Free Postgres upgraded before its 30-day expiry, or accepted as a trial
 - [ ] Change the admin password after first sign-in (Settings → Account)
 - [ ] `npm run blueprintcheck` clean, so the deploy stays free

@@ -1,7 +1,9 @@
 # Memes Arcade - Render Blueprint (Infrastructure as Code)
 #
 # Everything in this file runs on Render's Free compute plan: one Node web
-# service. No disk, no background worker, no database, no second instance.
+# service plus one Free Postgres database. No disk, no background worker, no
+# second instance, and a single database (Render allows one Free Postgres per
+# workspace).
 # What "free" means here:
 #   - 0.1 CPU / 512 MB, and the service spins down after 15 minutes with no
 #     inbound traffic (the next visit waits ~1 minute for it to wake)
@@ -12,6 +14,11 @@
 #   - WebSockets, custom domains and managed TLS are included
 #   - persistent disks and background workers are not (see docs/DEPLOY.md for
 #     the paid upgrade snippets)
+#   - Free Postgres is 1 GB and ONE per workspace, and it EXPIRES 30 days after
+#     creation: Render gives 14 days' grace, then deletes it. Upgrade the
+#     database in the dashboard before then to keep accounts. The app notices a
+#     missing database, says so, and falls back to the ephemeral file instead of
+#     refusing to start.
 #
 # Deploy: push this repo to GitHub, then in Render choose
 #   New -> Blueprint -> pick the repo -> Apply.
@@ -24,10 +31,11 @@ services:
     runtime: node
     plan: free
     autoDeployTrigger: commit
-    # No `npm install`: the project has no dependencies. The build runs the
-    # project's own checks, so a broken engine - or a blueprint edit that starts
-    # asking for something paid - fails the deploy instead of the players.
-    buildCommand: npm run check && npm run blueprintcheck
+    # `pg` is the one runtime dependency (the store). The build installs it and
+    # runs the project's own checks, so a broken engine - or a blueprint edit
+    # that starts asking for something paid - fails the deploy instead of the
+    # players.
+    buildCommand: npm install && npm run check && npm run dbcheck && npm run blueprintcheck
     startCommand: npm start
     healthCheckPath: /api/health
     # No `maxShutdownDelaySeconds:` - Render's validator refuses it on a free
@@ -62,6 +70,21 @@ services:
       # Discord bot").
       - key: MEMES_BOT_SECRET
         generateValue: true
+      # The Blueprint's own Postgres. Render fills this from the database below
+      # (internal connection string), so no password ever lives in this file.
+      # The app keeps its whole store in one JSONB row there - accounts, ideas,
+      # rooms, bot memory - instead of the ephemeral data/db.json.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: memes-arcade-db
+          property: connectionString
       # Close registrations once your friends have signed up:
       # - key: MEMES_REGISTRATIONS
       #   value: closed
+
+databases:
+  - name: memes-arcade-db
+    plan: free
+    # Free Postgres tops out at 1 GB; asking for more is a paid plan.
+    diskSizeGB: 1
+    postgresMajorVersion: "18"

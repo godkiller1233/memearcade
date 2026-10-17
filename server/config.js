@@ -64,6 +64,13 @@ export const config = {
     enabled: !!env.DISCORD_TOKEN,
   },
 
+  /**
+   * Where the store lives. Render hands its Blueprint database in as
+   * DATABASE_URL; MEMES_DATABASE_URL is the local override. Empty means the
+   * JSON file in data/, which is what every check suite and local play use.
+   */
+  databaseUrl: (env.MEMES_DATABASE_URL || env.DATABASE_URL || '').trim(),
+
   sessionTtlDays: num(env.MEMES_SESSION_DAYS, 30),
   maxWsMessage: num(env.MEMES_MAX_WS, 6 * 1024 * 1024),
   /** How long a disconnected party member keeps their seat before cleanup. */

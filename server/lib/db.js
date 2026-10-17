@@ -3,6 +3,7 @@ import path from 'node:path';
 import { config } from '../config.js';
 import { now } from './ids.js';
 import { log } from '../config.js';
+import { PostgresBackend } from './db-postgres.js';
 
 const SCHEMA = 1;
 
@@ -59,7 +60,7 @@ export function defaultData() {
   };
 }
 
-function migrate(data) {
+export function migrate(data) {
   const out = { ...defaultData(), ...data };
   // keep collections that might be missing after an upgrade
   const base = defaultData();
@@ -73,33 +74,118 @@ function migrate(data) {
   return out;
 }
 
-class Db {
-  constructor() {
-    this.file = path.join(config.dataDir, 'db.json');
-    this.backup = path.join(config.dataDir, 'db.backup.json');
+/**
+ * The JSON-file backend: a temp file and a rename, so a crash can never
+ * truncate the store, with the previous write kept as a backup. Used when there
+ * is no DATABASE_URL, and as the fallback when Postgres cannot be reached.
+ */
+export class FileBackend {
+  constructor({ file, backup }) {
+    this.file = file;
+    this.backup = backup;
+    this.kind = 'file';
+  }
+
+  /** The parsed file, or null when there is nothing readable to load. */
+  read() {
+    try {
+      fs.mkdirSync(path.dirname(this.file), { recursive: true });
+    } catch {}
+    if (!fs.existsSync(this.file)) return null;
+    try {
+      return JSON.parse(fs.readFileSync(this.file, 'utf8'));
+    } catch (err) {
+      log('db: main file unreadable, trying backup:', err.message);
+      if (!fs.existsSync(this.backup)) return null;
+      try {
+        return JSON.parse(fs.readFileSync(this.backup, 'utf8'));
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  /** Atomic write: temp file + rename, so a crash can never truncate the db. */
+  write(json) {
+    fs.mkdirSync(path.dirname(this.file), { recursive: true });
+    const tmp = `${this.file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, json);
+    try {
+      if (fs.existsSync(this.file)) fs.copyFileSync(this.file, this.backup);
+    } catch {}
+    fs.renameSync(tmp, this.file);
+  }
+
+  async close() {}
+}
+
+/**
+ * The store every caller already knows: `db.data` is a live object and writes
+ * are coalesced behind it.
+ *
+ * `open()` decides where the object comes from and goes to. With a
+ * DATABASE_URL the whole document is one JSONB row in Postgres (see
+ * db-postgres.js) and every write is an upsert; without one it is the JSON file
+ * that local play and every check suite use. The in-memory tree and the
+ * synchronous `data` getter stay the same either way, which is what keeps the
+ * hundred store call sites untouched.
+ */
+export class Db {
+  constructor({ file = path.join(config.dataDir, 'db.json'), backup = path.join(config.dataDir, 'db.backup.json'), backend = null } = {}) {
+    this.file = file;
+    this.backup = backup;
+    this._backend = backend;
+    this.kind = backend?.kind || 'file';
     this._data = defaultData();
     this._dirty = false;
     this._timer = null;
-    this._writing = false;
+    this._queue = Promise.resolve();
+    this.closed = false;
+    this.failed = false;
   }
 
-  load() {
-    fs.mkdirSync(config.dataDir, { recursive: true });
-    if (fs.existsSync(this.file)) {
+  /**
+   * Load the store. Async because a database has to be opened and read, but
+   * every caller after this point keeps using `db.data` synchronously.
+   *
+   * A configured Postgres that cannot be reached does not stop the arcade: it
+   * logs loudly and falls back to the file, so a database outage is a
+   * durability problem rather than a dead site. The banner and /api/health say
+   * which store is live.
+   */
+  async open({ databaseUrl = config.databaseUrl, logFn = log, openDatabase = PostgresBackend.open } = {}) {
+    this.closed = false;
+    this.failed = false;
+    let backend = this._backend;
+    let kind = backend?.kind || null;
+
+    if (!backend && databaseUrl) {
       try {
-        const raw = JSON.parse(fs.readFileSync(this.file, 'utf8'));
-        this._data = migrate(raw);
+        backend = await openDatabase(databaseUrl, { log: logFn });
+        kind = 'postgres';
       } catch (err) {
-        log('db: main file unreadable, trying backup:', err.message);
-        if (fs.existsSync(this.backup)) {
-          this._data = migrate(JSON.parse(fs.readFileSync(this.backup, 'utf8')));
-        } else {
-          this._data = defaultData();
-        }
+        logFn(`db: Postgres unavailable (${err.message}) - falling back to the JSON file; accounts will not survive a restart until this is fixed`);
+        backend = new FileBackend({ file: this.file, backup: this.backup });
+        kind = 'file-fallback';
       }
+    }
+    if (!backend) {
+      backend = new FileBackend({ file: this.file, backup: this.backup });
+      kind = 'file';
+    }
+    this._backend = backend;
+    this.kind = kind;
+
+    const stored = await backend.read();
+    if (stored) {
+      this._data = migrate(stored);
     } else {
-      this._data = defaultData();
-      this.flush();
+      // A fresh database still imports an existing file once, so switching a
+      // running arcade to Postgres keeps the accounts it already has.
+      const fromFile = kind === 'postgres' ? new FileBackend({ file: this.file, backup: this.backup }).read() : null;
+      this._data = migrate(fromFile || defaultData());
+      this._dirty = true;
+      await this.flush();
     }
     this.prune();
     return this._data;
@@ -124,7 +210,7 @@ class Db {
   /** Mark dirty; writes are coalesced so hot paths stay cheap. */
   touch() {
     this._dirty = true;
-    if (this._timer) return;
+    if (this.closed || this._timer) return;
     this._timer = setTimeout(() => {
       this._timer = null;
       this.flush();
@@ -132,32 +218,36 @@ class Db {
     if (this._timer.unref) this._timer.unref();
   }
 
-  /** Atomic write: temp file + rename, so a crash can never truncate the db. */
+  /**
+   * Write the current document. Writes are serialised: a change made while one
+   * is in flight lands in the next one, never in the same row out of order.
+   */
   flush() {
-    if (!this._dirty || this._writing) return;
+    if (this.closed || !this._dirty) return this._queue;
     this._dirty = false;
-    this._writing = true;
-    try {
-      fs.mkdirSync(config.dataDir, { recursive: true });
-      const tmp = `${this.file}.${process.pid}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(this._data, null, 0));
-      try {
-        if (fs.existsSync(this.file)) fs.copyFileSync(this.file, this.backup);
-      } catch {}
-      fs.renameSync(tmp, this.file);
-    } catch (err) {
-      log('db: write failed:', err.message);
-      this._dirty = true;
-    } finally {
-      this._writing = false;
-    }
+    const payload = JSON.stringify(this._data);
+    this._queue = this._queue
+      .then(() => this._backend.write(payload))
+      .catch((err) => {
+        this._dirty = true;
+        this.failed = true;
+        log('db: write failed:', err.message);
+      });
+    return this._queue;
   }
 
-  close() {
+  /** Final write, then release the connection. Awaited by shutdown. */
+  async close() {
+    this.closed = true;
     if (this._timer) clearTimeout(this._timer);
     this._timer = null;
-    this._dirty = true;
-    this.flush();
+    await this._queue;
+    try {
+      await this._backend.write(JSON.stringify(this._data));
+    } catch (err) {
+      log('db: final write failed:', err.message);
+    }
+    await this._backend.close?.();
   }
 }
 

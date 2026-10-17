@@ -37,8 +37,9 @@ npm start                      # server + website on http://localhost:8787
 cd desktop && npm install && npm start   # the desktop window instead
 ```
 
-The server has **zero dependencies** - `npm start` works immediately, no
-`npm install` required. Node 18+ is the only prerequisite.
+The server needs **no install for local play** - `npm start` works immediately
+from `data/db.json`. Node 18+ is the only prerequisite. Only a Postgres store
+needs `npm install` once for the `pg` driver.
 
 **Host mode** in the desktop app starts that same server as a child process,
 waits for `/api/health` to answer, then loads it. Your saves live in Electron's

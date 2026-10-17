@@ -12,6 +12,7 @@
     "dev": "node --watch server/index.js",
     "check": "node tools/check.mjs",
     "blueprintcheck": "node tools/blueprint-check.mjs",
+    "dbcheck": "node tools/db-check.mjs",
     "test": "node tools/test-engines.mjs",
     "notifycheck": "node tools/notify-check.mjs",
     "smoke": "node tools/smoke.mjs",
@@ -25,9 +26,11 @@
     "leakcheck": "node tools/leak-check.mjs",
     "bot": "node bot/index.js",
     "desktop": "node desktop/main.js",
-    "verify": "node tools/check.mjs && node tools/blueprint-check.mjs && node tools/notify-check.mjs && node tools/test-engines.mjs && node tools/realtime-check.mjs && node tools/browser-reload-check.mjs && node tools/bot-check.mjs && node tools/desktop-check.mjs && node tools/perm-check.mjs && node tools/leak-check.mjs"
+    "verify": "node tools/check.mjs && node tools/db-check.mjs && node tools/blueprint-check.mjs && node tools/notify-check.mjs && node tools/test-engines.mjs && node tools/realtime-check.mjs && node tools/browser-reload-check.mjs && node tools/bot-check.mjs && node tools/desktop-check.mjs && node tools/perm-check.mjs && node tools/leak-check.mjs"
   },
-  "dependencies": {},
+  "dependencies": {
+    "pg": "^8.23.1"
+  },
   "keywords": [
     "games",
     "party-games",

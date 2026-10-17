@@ -2,7 +2,8 @@
 /**
  * Memes Arcade - server entry point.
  *
- * Boots: JSON database -> game engines -> HTTP static/REST -> WebSocket hub,
+ * Boots: the store (Postgres or JSON file) -> game engines -> HTTP static/REST
+ * -> WebSocket hub,
  * seeds the administrator account, and prints practical "how do I play with
  * friends" instructions including the LAN URLs.
  */
@@ -26,8 +27,9 @@ async function main() {
   ensureDirs();
 
   log(`Memes Arcade v${APP_VERSION} (api v${API_VERSION}) starting...`);
-  db.load();
-  log(`database: ${Object.keys(db.data.users).length} accounts, ${db.data.stats.gamesPlayed} games played`);
+  await db.open();
+  const store = db.kind === 'postgres' ? 'Postgres' : db.kind === 'file-fallback' ? 'JSON file (Postgres unreachable)' : 'JSON file';
+  log(`database: ${store} - ${Object.keys(db.data.users).length} accounts, ${db.data.stats.gamesPlayed} games played`);
 
   await loadEngines();
 
@@ -88,7 +90,7 @@ async function main() {
     sweeper.stop();
     hub.shutdown();
     rooms.rooms.clear?.();
-    db.close();
+    await db.close();
     setTimeout(() => process.exit(0), 250);
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
@@ -171,6 +173,7 @@ function banner(port, admin, bot) {
   lines.push(`   REST API ......... ${base}/api/meta`);
   lines.push(`   Health check ..... ${base}/api/health`);
   lines.push(`   WebSocket ........ ${base.replace(/^http/, 'ws')}/ws`);
+  lines.push(`   Store ............ ${db.kind === 'postgres' ? 'Postgres (memes_arcade_store)' : db.kind === 'file-fallback' ? 'JSON file - Postgres was unreachable' : `JSON file (${path.relative(process.cwd(), db.file)})`}`);
   lines.push('');
   if (admin.created) {
     lines.push(`   ADMIN ACCOUNT .... ${admin.user.name} / ${admin.password}`);
@@ -181,7 +184,9 @@ function banner(port, admin, bot) {
   lines.push(`   BOT SECRET ....... ${botSecret()}`);
   lines.push(`   Discord bot ...... ${bot?.running ? `started with the site (pid ${bot.pid ?? '?'})` : `off - ${bot?.reason || 'no DISCORD_TOKEN'}`}`);
   lines.push('');
-  if (config.onPlatform) {
+  if (config.onPlatform && db.kind === 'postgres') {
+    lines.push(`   Hosted mode ...... accounts live in Postgres; ${config.dataDir} is scratch for logs and saves.`);
+  } else if (config.onPlatform) {
     lines.push(`   Hosted mode ...... ${config.dataDir} is ephemeral unless a persistent disk is attached.`);
     lines.push('   Set MEMES_ADMIN_PASS + MEMES_BOT_SECRET in the dashboard so restarts keep');
     lines.push('   the same admin password and bot token. Full guide: docs/DEPLOY.md');

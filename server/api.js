@@ -311,6 +311,9 @@ export function registerApi(app, { rooms, hub }) {
   app.get('/api/health', () => ({
     ok: true,
     status: 'healthy',
+    // Which store is actually live: a configured Postgres that fell back to
+    // the JSON file is a durability problem the uptime check should show.
+    store: db.kind,
     now: now(),
     uptime: process.uptime(),
     rooms: rooms.rooms.size,

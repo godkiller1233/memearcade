@@ -2,15 +2,16 @@
 /**
  * Render Blueprint guard - keeps `render.yaml` both valid and *free*.
  *
- * Packages can't be added to read YAML (the project has no dependencies), so
- * this reads the small subset of YAML the Blueprint uses: indented maps, lists,
+ * Packages can't be added to read YAML (the only dependency is the pg driver
+ * for the store), so this reads the small subset of YAML the Blueprint uses: indented maps, lists,
  * `- key: value` list items, scalars and comments.
  *
  * What it proves:
  *   1. every service is legal on Render's Free compute plan - `type: web` with
  *      `plan: free`, no disk, no extra instances, no autoscaling, no paid-only
- *      fields, no field the platform itself refuses on a free instance, no
- *      databases (only web services get a free instance)
+ *      fields, no field the platform itself refuses on a free instance, and at
+ *      most one database, which must be `plan: free` (Render's free Postgres
+ *      is limited to one per workspace and 1 GB)
  *   2. the commands Render runs exist in package.json
  *   3. the health check path is one the server really serves
  *   4. every environment variable is one the code actually reads (catches
@@ -153,6 +154,9 @@ const FREE_TIER_REJECTED = new Map([
 ]);
 const SECRET_NAME = /(PASS|PASSWORD|TOKEN|SECRET|_KEY$|APIKEY)/;
 
+/** Database properties a service may reference with `fromDatabase`. */
+const DB_PROPERTIES = new Set(['connectionString', 'connectionPoolString', 'host', 'port', 'database', 'user', 'password']);
+
 function main() {
   if (!fs.existsSync(FILE)) {
     note('no render.yaml at the repo root - skipping the Blueprint check');
@@ -195,18 +199,39 @@ function main() {
       report(false, `${label} stays on one instance`, `numInstances: ${service.numInstances} - free instances can't scale, and rooms/parties live in memory`);
     }
   }
-  if (!PAID_ESCAPE) {
-    for (const field of ['databases', 'previews', 'previewsEnabled']) {
-      if (doc[field] !== undefined) report(false, `the blueprint asks for no ${field}`, 'not free / not needed - the app is zero-dependency and stores JSON on disk');
+  const databases = Array.isArray(doc.databases) ? doc.databases : [];
+  if (databases.length > 1) {
+    report(false, 'the blueprint asks for at most one database', 'Render allows one Free Postgres per workspace');
+  }
+  for (const database of databases) {
+    const label = `${database.name || '(unnamed database)'} (database)`;
+    if (!database.name) report(false, 'every database has a name');
+    if (PAID_ESCAPE) continue;
+    report(database.plan === 'free', `${label} asks for the free plan`,
+      `plan: ${database.plan ?? '(unset - paid)'}`);
+    if (database.diskSizeGB !== undefined) {
+      report(Number(database.diskSizeGB) <= 1, `${label} stays within the free 1 GB`,
+        `diskSizeGB: ${database.diskSizeGB}`);
     }
+  }
+  if (!PAID_ESCAPE) {
+    for (const field of ['previews', 'previewsEnabled']) {
+      if (doc[field] !== undefined) report(false, `the blueprint asks for no ${field}`, 'not free / not needed');
+    }
+  }
+  for (const database of databases) {
+    const wired = services.some((service) => (Array.isArray(service.envVars) ? service.envVars : [])
+      .some((variable) => variable.fromDatabase?.name === database.name));
+    report(wired, `database ${database.name} is handed to a service`, wired ? '' : 'nothing references it, so it would sit unused');
   }
   if (services.length > 1) {
     note(`${services.length} services: the free tier grants 750 instance hours per workspace per month, so a second always-awake service would trip the cap`);
   }
   if (!failures) {
     const plan = services.map((s) => `${s.name}=${s.plan}`).join(', ');
+    const data = databases.length ? ` with ${databases.map((d) => `${d.name}=${d.plan}`).join(', ')}` : '';
     report(true, 'the blueprint only asks for free resources',
-      `${plan}; no disk, no extra instances, no paid-only fields, none of the ${FREE_TIER_REJECTED.size} field(s) Render refuses on free`);
+      `${plan}${data}; no disk, no extra instances, no paid-only fields, none of the ${FREE_TIER_REJECTED.size} field(s) Render refuses on free`);
   }
 
   console.log('\n[3/4] commands, health check and environment');
@@ -253,8 +278,15 @@ function main() {
       const readable = PLATFORM_KEYS.has(key) || known.has(key);
       report(readable, `env ${key} is read by the code`,
         readable ? '' : 'nothing in server/, bot/, web/ or desktop/ reads it - probably a typo');
-      const sources = ['value', 'sync', 'generateValue', 'fromService'].filter((f) => variable[f] !== undefined);
+      const sources = ['value', 'sync', 'generateValue', 'fromService', 'fromDatabase'].filter((f) => variable[f] !== undefined);
       report(sources.length === 1, `env ${key} has exactly one source`, sources.join(' + ') || 'none');
+      if (variable.fromDatabase) {
+        const ref = variable.fromDatabase;
+        const declared = databases.some((database) => database.name === ref?.name);
+        report(declared, `env ${key} points at a declared database`, declared ? '' : `${ref?.name} is not under databases:`);
+        const realProperty = DB_PROPERTIES.has(ref?.property);
+        report(realProperty, `env ${key} asks for a real database property`, realProperty ? '' : String(ref?.property));
+      }
       if (SECRET_NAME.test(key) && variable.value !== undefined) {
         report(false, `env ${key} is not committed in the file`, 'use sync: false (the Dashboard prompts) or generateValue: true');
       }

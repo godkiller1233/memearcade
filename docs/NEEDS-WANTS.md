@@ -244,6 +244,43 @@ not, coming back clears the departure but keeps the first-seen date, a
 history, and the memory is read back from `db.json` to prove it outlives the
 process.
 
+## Built on request: the arcade gets a database
+
+**Render wiped `data/` on every deploy, restart and spin-down, so accounts,
+ideas and the bot's memory reset.** The Blueprint now provisions a Free
+Postgres, and the server keeps its store there.
+
+- **A document, not a schema rewrite.**  Every store call reads one in-memory
+  tree synchronously (`db.data`), and every engine's save path does too. Rather
+  than turn those hundreds of call sites async, the tree is one JSONB row
+  (`memes_arcade_store`, id `db`) written behind the scenes: create table on
+  boot, `SELECT` to load, one `ON CONFLICT` upsert per write. Writes stay
+  debounced and are serialised, so a busy room is one write about every 1.2s
+  and the final change is flushed on shutdown.
+- **Local play still needs no install.**  With no `DATABASE_URL` the store is
+  the same atomic `data/db.json` (temp file + rename, previous file as backup)
+  that every check suite and the desktop app use. `pg` is the one runtime
+  dependency and is imported only when a connection string exists.
+- **A broken database is not a dead site.**  If Postgres cannot be reached at
+  boot the server logs it, falls back to the file and reports
+  `"store":"file-fallback"` from `/api/health`, so an uptime check can see the
+  durability problem instead of only the owner noticing missing accounts.
+- **The blueprint check grew a database rule.**  `render.yaml` may now declare
+  at most one database, it must be `plan: free` and no larger than 1 GB, it has
+  to be handed to a service, and every `fromDatabase` reference has to name a
+  declared database and a real property. A paid database still fails the build
+  unless `MEMES_BLUEPRINT_PAID=1` is set.
+
+`npm run dbcheck` is new and covers both backends without a Postgres server: 25
+checks for the file seed/write/reload and backup fallback, the create/select/
+upsert SQL, serialised writes, the flush on close, reading the document back in
+a new process, and the unreachable-database fallback.
+
+**Caveat:** Render's Free Postgres is a 30-day trial (1 GB, one per workspace)
+and is deleted 14 days after expiry unless upgraded (about $6/mo). Keep that date
+in the deploy checklist; the fallback keeps the site up but stops being durable
+once the database is gone.
+
 ## Wanted next (not done)
 
 - **Friends: party invites have no lasting home.** A missed toast is gone for

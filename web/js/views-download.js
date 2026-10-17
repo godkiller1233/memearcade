@@ -93,7 +93,7 @@ export function downloadView(mount) {
       'Open http://localhost:8787 - you are the host now. Friends on your wifi use the "Same wifi" address the server prints.',
       'Want the desktop window instead of a browser tab? Run: cd desktop && npm install && npm start',
     ]),
-    el('p', { class: 'muted small', text: 'Zero dependencies for the server itself - npm start works immediately, no npm install needed.' }),
+    el('p', { class: 'muted small', text: 'Nothing to install for local play - npm start works immediately. Only connecting a Postgres database needs npm install (the pg driver).' }),
   );
   const lite = el('div', { class: 'card' },
     el('h3', { text: '🪶 Run the Lite download (uses this website)' }),
