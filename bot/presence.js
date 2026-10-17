@@ -75,7 +75,10 @@ export class GuildReporter {
     this.log = log;
     this.everyMs = Math.max(Number(everyMs) || 0, 2000);
     this.timer = null;
+    this.changeTimer = null;
     this.busy = false;
+    /** Ids in the last completed report; null until the first one lands. */
+    this.lastIds = null;
   }
 
   /** One report. Concurrent calls collapse into the one already running. */
@@ -104,12 +107,51 @@ export class GuildReporter {
         appId: this.me?.id || null,
         username: this.me?.username || null,
         guilds: summary,
+        // The summary is capped at MAX_GUILDS. The arcade needs the full count
+        // to tell a capped slice (nobody left) from a complete list (servers
+        // that are missing have been left).
+        total: list.length,
       });
+      this.lastIds = new Set(summary.map((guild) => guild.id));
       this.log(`reported ${summary.length} server${summary.length === 1 ? '' : 's'} to the arcade console`);
       return summary;
     } finally {
       this.busy = false;
     }
+  }
+
+  /**
+   * Discord announced a server the bot joined, or one it was removed from, so
+   * the console should hear now rather than at the next timer. The gateway
+   * replays every guild after READY and joins can arrive together, so a burst
+   * is collapsed into one report. `kind` is 'join' or 'leave'.
+   */
+  noteGuildChange(kind, guild) {
+    const id = String(guild?.id ?? '');
+    if (!/^\d{5,25}$/.test(id)) return;
+    const known = this.lastIds;
+    if (known && kind === 'join' && !known.has(id)) {
+      this.log(`joined a server (${id}) - adding it to the console list`);
+    } else if (known && kind === 'leave' && known.has(id)) {
+      this.log(`removed from a server (${id}) - keeping it in the console history`);
+    }
+    this.schedule();
+  }
+
+  /** Report once, a moment after the last change in a burst. */
+  schedule(delayMs = 1500) {
+    if (this.changeTimer) return;
+    this.changeTimer = setTimeout(() => {
+      this.changeTimer = null;
+      this.report()
+        .then((result) => {
+          // A report already in flight makes this one a no-op. Try again, or
+          // the join/leave would wait for the next timer tick.
+          if (result === null && !this.changeTimer) this.schedule(1000);
+        })
+        .catch((err) => this.log(`server list report failed: ${err.message}`));
+    }, delayMs);
+    this.changeTimer.unref?.();
   }
 
   /** Report now, then keep the console's list fresh (and re-listed after outages). */
@@ -123,6 +165,8 @@ export class GuildReporter {
 
   stop() {
     clearInterval(this.timer);
+    clearTimeout(this.changeTimer);
     this.timer = null;
+    this.changeTimer = null;
   }
 }

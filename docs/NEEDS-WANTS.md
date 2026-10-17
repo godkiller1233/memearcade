@@ -212,6 +212,38 @@ listening, and stops it on Ctrl+C.
 sees it identify, the bot's log proves it reached that arcade with the secret
 the site handed over, and stopping that arcade is checked to disconnect the bot.
 
+## Built on request: the bot finds its servers and remembers them
+
+**The console's server list was one snapshot, so a server the bot left simply
+vanished.**  The bot now discovers its servers on its own and the arcade keeps a
+memory of every one it has been in.
+
+- **Found without asking.**  The bot reads `/users/@me/guilds` at boot, on the
+  existing `BOT_GUILD_REPORT_MS` timer, and immediately when Discord pushes
+  `GUILD_CREATE` or `GUILD_DELETE`.  A burst of joins is debounced into one
+  report, and a guild Discord marks `unavailable` during an outage is not a
+  leave - the bot only reports what actually changed.
+- **A memory, not a snapshot.**  `data/db.json` keeps `botGuilds`: every server
+  the bot has seen, with `firstSeen`, `lastSeen` and `leftAt`.  A complete report
+  that omits a server sets its `leftAt` instead of deleting it; a server the bot
+  is added to again clears it and keeps the original `firstSeen`.  The memory is
+  bounded at 200 servers, dropping the longest-departed first.
+- **A capped report cannot look like a mass exit.**  Reports hold at most 60
+  servers, so the bot sends its true `total`; only a complete report may mark
+  servers missing from it as left.
+- **The console shows both halves.**  The live table gained a **First seen**
+  column, and a **🕘 Previously in** table lists servers the bot was removed
+  from with when it left and when it was last seen.  The next report naming one
+  moves it straight back up.
+
+`npm run botcheck` grew from 211 to 221 checks: a complete report leaving a
+server out marks it left, a capped report (`total` larger than the slice) does
+not, coming back clears the departure but keeps the first-seen date, a
+`GUILD_CREATE` reaches the console without waiting for the timer, a
+`GUILD_DELETE` marked `unavailable` is ignored, a real removal lands in the
+history, and the memory is read back from `db.json` to prove it outlives the
+process.
+
 ## Wanted next (not done)
 
 - **Friends: party invites have no lasting home.** A missed toast is gone for

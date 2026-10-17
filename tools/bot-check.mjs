@@ -21,7 +21,7 @@
  * protocol.
  */
 import { spawn } from 'node:child_process';
-import { rmSync, writeFileSync } from 'node:fs';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -593,6 +593,7 @@ async function run() {
     return res.ok && res.payload?.guilds?.length ? res.payload : null;
   }, 15000, "the bot's server list report");
   const reported = presenceList.guilds || [];
+  const partyFirstSeen = reported.find((g) => g.id === '910000000000000002')?.firstSeen;
   check(reported.length === 2 && reported[0]?.name === 'Arcade Test Server',
     "the bot reports every server it is in, the owner's first",
     reported.map((g) => `${g.name}${g.owner ? ' (owner)' : ''}`).join(', '));
@@ -650,6 +651,98 @@ async function run() {
   check(afterCraft.bot?.id === null && afterCraft.inviteUrl === null,
     'a bad application id yields no invite link rather than a broken one',
     `${afterCraft.bot?.id} / ${afterCraft.inviteUrl}`);
+
+  /* 4c. The bot has a memory of its servers. A complete report that leaves one
+        out marks it as left instead of forgetting it; a capped report says
+        nothing about the servers outside its slice; and a server the bot comes
+        back to keeps the date it first arrived. */
+  const leftOne = afterCraft.left?.find((g) => g.id === '910000000000000002');
+  check(!!leftOne && leftOne.name === 'Party Friends' && Number.isFinite(leftOne.leftAt),
+    'a server missing from a complete report is remembered as left', JSON.stringify(afterCraft.left));
+  check(Number.isFinite(reported.find((g) => g.id === '910000000000000002')?.firstSeen),
+    'each live server remembers when it was first seen', JSON.stringify(reported.map((g) => g.firstSeen)));
+
+  await fetch(`${ARCADE}/api/bot/guilds`, {
+    method: 'POST',
+    headers: { 'x-bot-token': BOT_SECRET, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      appId: APP_ID,
+      username: 'memes-arcade-bot',
+      total: 2,
+      guilds: [{ id: '910000000000000001', name: 'Arcade Test Server', owner: true, channels: 3 }],
+    }),
+  });
+  const capped = (await arcade('GET', '/api/admin/bot/guilds', { token: admin.payload.token })).payload || {};
+  check(capped.guilds?.length === 2 && capped.guilds.some((g) => g.id === '910000000000000009'),
+    'a capped report does not look like the bot left the servers outside it',
+    JSON.stringify(capped.guilds?.map((g) => g.id)));
+
+  await fetch(`${ARCADE}/api/bot/guilds`, {
+    method: 'POST',
+    headers: { 'x-bot-token': BOT_SECRET, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      appId: APP_ID,
+      username: 'memes-arcade-bot',
+      total: 2,
+      guilds: [
+        { id: '910000000000000001', name: 'Arcade Test Server', owner: true, channels: 3 },
+        { id: '910000000000000002', name: 'Party Friends', owner: false, channels: null },
+      ],
+    }),
+  });
+  const rejoined = (await arcade('GET', '/api/admin/bot/guilds', { token: admin.payload.token })).payload || {};
+  const partyBack = rejoined.guilds?.find((g) => g.id === '910000000000000002');
+  check(!!partyBack && !rejoined.left?.some((g) => g.id === '910000000000000002'),
+    'a server the bot is in again comes back from the history', JSON.stringify(rejoined.left));
+  check(partyBack?.firstSeen === partyFirstSeen,
+    'coming back keeps the original first-seen date', `${partyBack?.firstSeen} vs ${partyFirstSeen}`);
+
+  /* 4d. Discord's own events move the list: a join shows up without waiting
+        for the five-minute refresh, an outage is not a leave, and a real
+        removal is what puts a server into the memory. */
+  const pushGateway = (type, data) => {
+    const conn = [...fake.connections][0];
+    if (!conn) throw new Error('the bot is not connected to the fake gateway');
+    conn.send({ op: 0, t: type, s: fake.seq++, d: data });
+  };
+  fake.guilds.push({ id: '910000000000000003', name: 'Weekend Server', icon: null, owner: false });
+  pushGateway('GUILD_CREATE', { id: '910000000000000003', name: 'Weekend Server' });
+  const joined = await waitFor(async () => {
+    const res = await arcade('GET', '/api/admin/bot/guilds', { token: admin.payload.token });
+    return res.ok && res.payload?.guilds?.some((g) => g.id === '910000000000000003') ? res.payload : null;
+  }, 10000, 'a join to reach the console without the report timer');
+  check(joined.guilds.some((g) => g.id === '910000000000000003'),
+    'a server the bot joins appears straight away', joined.guilds.map((g) => g.id).join(', '));
+  check(botLog.join('').includes('joined a server (910000000000000003)'),
+    'the bot says it joined a server', botLog.join('').split('\n').filter((l) => l.includes('server (')).slice(-2).join(' | '));
+
+  // Discord calls a guild "unavailable" during an outage: it is still the
+  // bot's server, and pretending otherwise would bury it in the history.
+  fake.guilds = fake.guilds.filter((g) => g.id !== '910000000000000003');
+  pushGateway('GUILD_DELETE', { id: '910000000000000003', unavailable: true });
+  await sleep(3000);
+  const afterOutage = (await arcade('GET', '/api/admin/bot/guilds', { token: admin.payload.token })).payload || {};
+  check(!!afterOutage.guilds?.find((g) => g.id === '910000000000000003')
+    && !afterOutage.left?.some((g) => g.id === '910000000000000003'),
+    'a Discord outage is not mistaken for the bot leaving', JSON.stringify(afterOutage.guilds?.map((g) => g.id)));
+
+  pushGateway('GUILD_DELETE', { id: '910000000000000003' });
+  const removed = await waitFor(async () => {
+    const res = await arcade('GET', '/api/admin/bot/guilds', { token: admin.payload.token });
+    return res.ok && res.payload?.left?.some((g) => g.id === '910000000000000003') ? res.payload : null;
+  }, 10000, 'a removal to reach the console history');
+  check(removed.left.find((g) => g.id === '910000000000000003')?.name === 'Weekend Server',
+    'a server the bot is removed from is kept, with its name', JSON.stringify(removed.left));
+
+  // The memory lives in the database file, not in either process, so an arcade
+  // or bot restart reads it back instead of starting empty.
+  const saved = await waitFor(() => {
+    const raw = JSON.parse(readFileSync(path.join(DATA, 'db.json'), 'utf8'));
+    return raw.botGuilds?.['910000000000000003']?.leftAt ? raw : null;
+  }, 8000, 'the server memory to be written to disk');
+  check(Number.isFinite(saved.botGuilds['910000000000000003'].firstSeen)
+    && saved.botGuilds['910000000000000003'].leftAt >= saved.botGuilds['910000000000000003'].firstSeen,
+    'the memory is written to the database, so a restart keeps it');
   await arcade('POST', `/api/admin/suggestions/${two.payload.suggestion.id}`, { token: admin.payload.token, body: { op: 'update', status: 'planned', note: 'On the roadmap.' } });
   const openOnly = await interact(fanUser, 'ideas', [{ name: 'status', value: 'open' }]);
   const openText = openOnly.message?.content || '';

@@ -69,12 +69,24 @@ the slash commands running - it does not go offline.
 ## The server list in the admin console
 
 Only the bot holds the Discord token, so it reports the servers it is in to the
-arcade (`POST /api/bot/guilds`) at boot and every `BOT_GUILD_REPORT_MS` after
-that. **Admin console → 🤖 Discord bot → 🌐 Servers** shows that list - owned
-servers first, with each one's text/announcement/forum channel count - and an
-**Open in Discord** button per server plus a copyable `!memearcade help`.
+arcade (`POST /api/bot/guilds`) at boot, every `BOT_GUILD_REPORT_MS` after that,
+and straight away when Discord sends `GUILD_CREATE` or `GUILD_DELETE`. A burst
+of joins is collapsed into one report, and a guild Discord marks `unavailable`
+during an outage is not treated as a leave.
+
+**Admin console → 🤖 Discord bot → 🌐 Servers** shows that list - owned servers
+first, with each one's text/announcement/forum channel count, the date it was
+first seen, and an **Open in Discord** button plus a copyable `!memearcade help`.
 That is the fastest way to check the bot before a match night: open the server
 and try a command there, where the channels and permissions are real.
+
+The arcade keeps a **memory** of every server the bot has been in, not just the
+last report. A server missing from a complete report is marked as left (it moves
+to **🕘 Previously in**, with when it left) instead of disappearing, and a server
+the bot is added to again keeps its original first-seen date. The bot sends its
+own total alongside the list, so a report capped at 60 servers never looks like
+the bot left everything outside the slice. The memory lives in `data/db.json`,
+so restarting the bot - or the site - reads it back instead of starting empty.
 
 The panel never calls Discord itself, and the list is read-only: it cannot make
 the bot say anything. A check-in older than 15 minutes is marked **stale**, and
@@ -175,7 +187,11 @@ It also covers the console's server list: the bot reads `/users/@me/guilds`,
 reports it with channel counts (and leaves the count blank when a server hides
 its channels), and the owner-only endpoint returns it with an invite link. Bad
 ids, duplicates and over-long names are dropped or capped, a non-staff account
-gets 403 and a report without the bot secret gets 401.
+gets 403 and a report without the bot secret gets 401. The memory is covered
+too: a complete report that omits a server marks it left, a capped one does not,
+a rejoin keeps the first-seen date, a `GUILD_CREATE` is reported at once, an
+`unavailable` `GUILD_DELETE` is ignored, and the whole thing is read back from
+`data/db.json`.
 
 It covers our side of the protocol without a Discord token; it does not test
 real Discord itself.

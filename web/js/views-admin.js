@@ -1100,6 +1100,7 @@ function drawBot(draw, fail) {
  */
 function botServersCard(presence) {
   const guilds = presence?.guilds || [];
+  const left = presence?.left || [];
   const who = presence?.bot?.username;
   const checkedIn = presence?.at
     ? `Checked in ${timeAgo(presence.at)}${who ? ` as ${who}` : ''}.`
@@ -1113,6 +1114,7 @@ function botServersCard(presence) {
       el('div', { class: 'row' },
         el('h3', { text: '🌐 Servers' }),
         pill(String(guilds.length), guilds.length ? 'good' : ''),
+        left.length ? pill(`${left.length} left`, '') : null,
         presence?.stale && presence?.at ? pill('stale', 'warn') : null),
       presence?.inviteUrl
         ? el('a', { class: 'btn sm', href: presence.inviteUrl, target: '_blank', rel: 'noopener noreferrer', text: '➕ Add to a server', style: { whiteSpace: 'nowrap' } })
@@ -1124,19 +1126,34 @@ function botServersCard(presence) {
     guilds.length
       ? el('div', { class: 'admin-scroll' },
           el('table', { class: 'admin-table' },
-            el('tr', {}, ['Server', 'Text channels', ''].map((h) => el('th', { text: h }))),
+            el('tr', {}, ['Server', 'Text channels', 'First seen', ''].map((h) => el('th', { text: h }))),
             guilds.map((g) => el('tr', {},
               el('td', {}, el('div', { class: 'row' },
                 el('span', { text: g.name }),
                 g.owner ? pill('owner') : null,
                 el('code', { class: 'mono small', text: g.id }))),
               el('td', { text: g.channels === null || g.channels === undefined ? '—' : fmtNum(g.channels) }),
+              el('td', { text: g.firstSeen ? timeAgo(g.firstSeen) : '—' }),
               el('td', {}, el('div', { class: 'row' },
                 el('a', { class: 'btn sm', href: `https://discord.com/channels/${g.id}`, target: '_blank', rel: 'noopener noreferrer', text: 'Open in Discord', style: { whiteSpace: 'nowrap' } }),
                 btn('Copy test', () => navigator.clipboard?.writeText('!memearcade help')
                   .then(() => toast('Copied - paste it in that server', 'good'), () => toast('!memearcade help')), { cls: 'sm', title: 'Copy the message command to paste in this server' })))))))
       : el('p', { class: 'muted', text: empty }),
-    el('p', { class: 'muted small', text: 'The bot reports this list every few minutes; this panel never calls Discord itself. Channel counts are the text, announcement and forum channels the bot can see - they are not a check that it may post in each one.' }),
+    left.length
+      ? el('div', { style: { marginTop: '14px' } },
+          el('h4', { text: '🕘 Previously in' }),
+          el('p', { class: 'muted small', text: 'Servers the bot has been removed from. They stay here across restarts, so a server that went quiet is still accounted for - the next report that includes one moves it back up.' }),
+          el('div', { class: 'admin-scroll' },
+            el('table', { class: 'admin-table' },
+              el('tr', {}, ['Server', 'Left', ''].map((h) => el('th', { text: h }))),
+              left.map((g) => el('tr', {},
+                el('td', {}, el('div', { class: 'row' },
+                  el('span', { text: g.name }),
+                  el('code', { class: 'mono small', text: g.id }))),
+                el('td', { text: g.leftAt ? timeAgo(g.leftAt) : '—' }),
+                el('td', {}, el('span', { class: 'muted small', text: g.lastSeen ? `last seen ${timeAgo(g.lastSeen)}` : '' })))))))
+      : null,
+    el('p', { class: 'muted small', text: 'The bot reports this list every few minutes, and right away when Discord says it joined or was removed from a server; this panel never calls Discord itself. Channel counts are the text, announcement and forum channels the bot can see - they are not a check that it may post in each one.' }),
   );
 }
 

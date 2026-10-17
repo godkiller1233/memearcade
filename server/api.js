@@ -184,6 +184,53 @@ function guildPresence(raw) {
 const BOT_PRESENCE_STALE_MS = 15 * 60000;
 
 /**
+ * How many servers the bot's memory keeps. A bot in more servers than it can
+ * report (60 per report) still only ever names 60 at a time, so this is room for
+ * history, not for a live list - the oldest departed servers go first.
+ */
+const BOT_GUILD_MEMORY_MAX = 200;
+
+/**
+ * Fold one report into the bot's memory of its servers.
+ *
+ * A report is a snapshot, not a diff: every server it names is present now, and
+ * one it leaves out has been left - unless the report was a capped slice, which
+ * is why the bot sends its own `total` alongside. That is the difference
+ * between "the bot left 140 servers" and "the bot is in more servers than one
+ * report may list". A server the bot comes back to keeps its firstSeen, so the
+ * console can still say when it first arrived.
+ */
+function rememberBotGuilds(reported, { at, total }) {
+  const memory = (db.data.botGuilds ||= {});
+  const present = new Set();
+  for (const guild of reported) {
+    present.add(guild.id);
+    const known = memory[guild.id];
+    memory[guild.id] = {
+      ...guild,
+      firstSeen: known?.firstSeen || at,
+      lastSeen: at,
+      leftAt: null,
+    };
+  }
+  // No total (an older bot) meant "this is the whole list"; keep that reading.
+  const complete = total === null || total <= reported.length;
+  if (complete) {
+    for (const row of Object.values(memory)) {
+      if (!present.has(row.id) && !row.leftAt) row.leftAt = at;
+    }
+  }
+  const rows = Object.values(memory);
+  if (rows.length > BOT_GUILD_MEMORY_MAX) {
+    rows
+      .filter((row) => row.leftAt)
+      .sort((a, b) => a.leftAt - b.leftAt)
+      .slice(0, rows.length - BOT_GUILD_MEMORY_MAX)
+      .forEach((row) => delete memory[row.id]);
+  }
+}
+
+/**
  * An invite link that adds the bot to another server. Send Messages is all it
  * needs to post a reply; the slash commands need applications.commands, and the
  * bot's own fallback needs Message Content enabled on the application.
@@ -1229,9 +1276,11 @@ export function registerApi(app, { rooms, hub }) {
 
   /**
    * Bot bridge: the servers the bot is in. The bot is the only process holding a
-   * Discord token, so it reports the list here; the console reads it back. One
-   * report replaces the last one, so a server the bot left disappears with the
-   * next report - there is no second place to keep it.
+   * Discord token, so it reports the list here; the console reads it back. The
+   * report updates a memory that outlives both processes: a server missing from
+   * a complete report is marked as left, not deleted, so the console can still
+   * show where the bot has been. `total` is how many servers Discord listed -
+   * when the report is a capped slice, the servers outside it have not left.
    */
   app.post('/api/bot/guilds', (ctx) => {
     requireBot(ctx);
@@ -1245,21 +1294,43 @@ export function registerApi(app, { rooms, hub }) {
       guilds.push(guild);
     }
     const appId = String(ctx.body.appId ?? '');
+    const at = now();
+    const total = Number(ctx.body.total);
+    rememberBotGuilds(guilds, { at, total: Number.isFinite(total) && total >= 0 ? total : null });
     db.data.botPresence = {
-      at: now(),
+      at,
       appId: /^\d{5,25}$/.test(appId) ? appId : null,
       username: typeof ctx.body.username === 'string' ? ctx.body.username.slice(0, 40) : null,
       guilds,
     };
     db.touch();
+    // A report is rare and it is the bot's whole memory: write it through now,
+    // so a hard kill a moment later cannot lose the server it just joined.
+    db.flush();
     return { ok: true, count: guilds.length };
   });
 
-  /** Admin console: the last server list the bot reported, with its age and an invite link. */
+  /**
+   * Admin console: the servers the bot is in now, plus the ones it remembers
+   * leaving, its last check-in and an invite link. The memory is the source of
+   * truth once a report has landed; before that (or on a database written
+   * before the memory existed) the last report still answers.
+   */
   app.get('/api/admin/bot/guilds', (ctx) => {
     requireStaff(ctx, ROLES.admin);
     const presence = db.data.botPresence || null;
     const age = presence?.at ? Math.max(0, now() - presence.at) : null;
+    let rows = Object.values(db.data.botGuilds || {});
+    if (!rows.length && presence?.guilds?.length) {
+      rows = presence.guilds.map((guild) => ({ ...guild, firstSeen: presence.at, lastSeen: presence.at, leftAt: null }));
+    }
+    const guilds = rows
+      .filter((row) => !row.leftAt)
+      .sort((a, b) => Number(b.owner) - Number(a.owner) || a.name.localeCompare(b.name));
+    const left = rows
+      .filter((row) => row.leftAt)
+      .sort((a, b) => b.leftAt - a.leftAt)
+      .slice(0, 100);
     return {
       ok: true,
       at: presence?.at || null,
@@ -1267,7 +1338,8 @@ export function registerApi(app, { rooms, hub }) {
       stale: age === null || age > BOT_PRESENCE_STALE_MS,
       bot: presence ? { id: presence.appId, username: presence.username } : null,
       inviteUrl: presence?.appId ? botInviteUrl(presence.appId) : null,
-      guilds: presence?.guilds || [],
+      guilds,
+      left,
     };
   });
 

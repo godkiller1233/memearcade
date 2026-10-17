@@ -25,6 +25,11 @@ export function defaultData() {
     // Last server list the Discord bot reported: { at, appId, username, guilds }.
     // Only the bot can read Discord, so this is the console's one source for it.
     botPresence: null,
+    // The bot's memory of every server it has been in: guild id -> { id, name,
+    // icon, owner, channels, firstSeen, lastSeen, leftAt }. A report updates the
+    // rows it names and marks a missing one as left instead of forgetting it, so
+    // a server the bot was removed from stays in the console's history.
+    botGuilds: {},
     reports: [], // { id, at, from, fromName, kind, text, status, resolvedBy, resolvedAt }
     suggestions: [], // { id, at, from, fromName, title, text, category, status, votes, adminNote }
     audit: [], // { at, actor, action, target, meta }

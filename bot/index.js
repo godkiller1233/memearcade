@@ -305,6 +305,11 @@ async function main() {
     onDispatch: (type, data) => {
       if (type === 'INTERACTION_CREATE') handleInteraction(data);
       else if (type === 'MESSAGE_CREATE') handleMessageCreate(data);
+      // Discord pushes a join or a removal, so the console does not wait for
+      // the next timer. `unavailable` is a Discord outage, not a leave -
+      // treating it as one would bury a server that is still the bot's.
+      else if (type === 'GUILD_CREATE') presence.noteGuildChange('join', data);
+      else if (type === 'GUILD_DELETE' && !data?.unavailable) presence.noteGuildChange('leave', data);
     },
     log,
   });
