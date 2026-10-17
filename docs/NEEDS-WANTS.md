@@ -152,6 +152,36 @@ a suggestion posted as the linked account, a second fake gateway that refuses th
 privileged intent until the bot retries without it, and the two help listings
 (one renderer, no command missing, no truncated message).
 
+## Built on request: the owner can see which servers the bot is in
+
+**An owner had no way to tell where the bot actually was.**  The arcade server
+never sees Discord - only the bot holds that token - so the console could show
+the bot secret and nothing about the servers it had joined.
+
+The bot now reports its server list to the arcade at boot and every five minutes
+(`BOT_GUILD_REPORT_MS`), and **Admin console → 🤖 Discord bot → 🌐 Servers**
+lists them: owned servers first, each one's text/announcement/forum channel
+count, an **Open in Discord** button, a copyable `!memearcade help`, and an
+invite link for adding the bot somewhere new.
+
+- **One-way, by design.**  The report is `POST /api/bot/guilds` behind the bot
+  secret; the console reads it back through an owner-only endpoint.  Nothing in
+  the panel can make the bot say anything, and no Discord credential ever lives
+  on the web server.
+- **Stale is said out loud.**  A check-in older than fifteen minutes is marked
+  stale, and an empty list explains whether the bot has never checked in or is
+  simply in no servers - the two failures an owner would otherwise have to guess
+  between.
+- **The report is input.**  Server ids must be snowflakes, names are flattened
+  onto one line and capped, duplicates collapse, and a guild whose channels
+  Discord hides keeps its row with the count left blank rather than a fake zero.
+
+`npm run botcheck` grew from 190 to 204 checks: the real report (owned first,
+channel counts, an unknown count when Discord hides them), the 403 for a player
+and the 401 for a report without the bot secret, plus a crafted report proving
+bad ids are dropped, duplicates are kept once, names are capped at 80 characters
+and a nonsense application id yields no invite link.
+
 ## Wanted next (not done)
 
 - **Friends: party invites have no lasting home.** A missed toast is gone for

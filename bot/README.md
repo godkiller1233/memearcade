@@ -66,6 +66,22 @@ Portal. DMs carry their text without it, so the fallback still works there. If
 the intent is off, the bot says so in its log, reconnects without it and keeps
 the slash commands running - it does not go offline.
 
+## The server list in the admin console
+
+Only the bot holds the Discord token, so it reports the servers it is in to the
+arcade (`POST /api/bot/guilds`) at boot and every `BOT_GUILD_REPORT_MS` after
+that. **Admin console → 🤖 Discord bot → 🌐 Servers** shows that list - owned
+servers first, with each one's text/announcement/forum channel count - and an
+**Open in Discord** button per server plus a copyable `!memearcade help`.
+That is the fastest way to check the bot before a match night: open the server
+and try a command there, where the channels and permissions are real.
+
+The panel never calls Discord itself, and the list is read-only: it cannot make
+the bot say anything. A check-in older than 15 minutes is marked **stale**, and
+an invite link is offered for adding the bot to another server. Channel counts
+are what the bot can see, not a check that it may post in every one; a server
+that hides its channels still appears, just without a number.
+
 ## Feature switches
 
 The bot honours the same switches as the website (Admin console → 🎚️ Features).
@@ -125,6 +141,12 @@ player's DMs are closed, and a vote and suggestion posted as the linked account.
 A second fake gateway closes the connection with 4014 unless the privileged
 intent is dropped, which proves the bot reconnects and keeps serving instead of
 dying on an unconfigured app.
+
+It also covers the console's server list: the bot reads `/users/@me/guilds`,
+reports it with channel counts (and leaves the count blank when a server hides
+its channels), and the owner-only endpoint returns it with an invite link. Bad
+ids, duplicates and over-long names are dropped or capped, a non-staff account
+gets 403 and a report without the bot secret gets 401.
 
 It covers our side of the protocol without a Discord token; it does not test
 real Discord itself.

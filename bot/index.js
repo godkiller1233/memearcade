@@ -21,6 +21,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Arcade } from './arcade.js';
 import { DiscordRest, DiscordGateway, FULL_INTENTS } from './discord.js';
+import { GuildReporter } from './presence.js';
 import { COMMAND_DEFINITIONS, FeatureGate, LinkStore, PUBLIC_COMMANDS, TEXT_PREFIX, autocomplete, describeSwitches, parseTextCommand, runCommand, textCommandHelp, textFallbackHints } from './commands.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -53,6 +54,15 @@ const config = {
   featureTtlMs: (() => {
     const n = Number(process.env.BOT_FEATURE_TTL_MS);
     return Number.isFinite(n) && n >= 0 ? n : 10000;
+  })(),
+  /**
+   * How often the console's server list is refreshed. The bot reports once at
+   * boot regardless; the timer is what repairs a list after the arcade restarts
+   * (which wipes its copy) without needing a bot restart too.
+   */
+  guildReportMs: (() => {
+    const n = Number(process.env.BOT_GUILD_REPORT_MS);
+    return Number.isFinite(n) && n >= 2000 ? n : 5 * 60000;
   })(),
 };
 
@@ -108,6 +118,11 @@ async function main() {
   }
 
   const links = new LinkStore(arcade);
+
+  // The console's server list: reported at boot, then kept fresh. Only this
+  // process holds the Discord token, so this is the arcade's only way to know.
+  const presence = new GuildReporter({ rest, arcade, me, log, everyMs: config.guildReportMs });
+  presence.start();
 
   /**
    * Autocomplete: answer from the live catalog inside Discord's 3s window.
@@ -250,6 +265,7 @@ async function main() {
 
   const shutdown = () => {
     log('shutting down');
+    presence.stop();
     gateway.stop();
     setTimeout(() => process.exit(0), 200).unref();
   };

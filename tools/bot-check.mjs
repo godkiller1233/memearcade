@@ -71,6 +71,13 @@ const fake = {
   identified: 0,
   intents: [], // intent mask on every IDENTIFY, in order
   strictIntents: [], // the strict gateway's IDENTIFY masks
+  // The servers /users/@me/guilds reports. Deliberately unsorted: the summary
+  // puts the owner's servers first, so a pass proves it did not just copy this.
+  guilds: [
+    { id: '910000000000000002', name: 'Party Friends', icon: null, owner: false },
+    { id: '910000000000000001', name: 'Arcade Test Server', icon: 'abcdef0123456789abcdef0123456789', owner: true },
+  ],
+  channelLookups: [], // guild ids whose channel list was asked for
 };
 
 const readBody = (req) => new Promise((resolve) => {
@@ -101,6 +108,22 @@ function startFakeDiscord() {
     }
     if (url.pathname === '/api/v10/gateway/bot') {
       return json(200, { url: `ws://127.0.0.1:${FAKE_PORT}/gateway` });
+    }
+    if (url.pathname === '/api/v10/users/@me/guilds') {
+      return json(200, fake.guilds);
+    }
+    const guildChannels = url.pathname.match(/^\/api\/v10\/guilds\/(\d+)\/channels$/);
+    if (guildChannels) {
+      fake.channelLookups.push(guildChannels[1]);
+      // One guild hides its channels, like a server that stripped the bot's view:
+      // the count must come back unknown, never zero.
+      if (guildChannels[1] !== '910000000000000001') return json(403, { message: 'Missing Access' });
+      return json(200, [
+        { id: '910000000000000101', type: 0, name: 'general' },
+        { id: '910000000000000102', type: 0, name: 'arcade' },
+        { id: '910000000000000103', type: 2, name: 'Voice' },
+        { id: '910000000000000104', type: 5, name: 'news' },
+      ]);
     }
     if (req.method === 'POST' && url.pathname === '/api/v10/users/@me/channels') {
       const id = body?.recipient_id;
@@ -442,6 +465,9 @@ async function startBot() {
       // Read the switches afresh for every command: the checks below flip them
       // and expect the very next interaction to see it.
       BOT_FEATURE_TTL_MS: '0',
+      // One report per run: the checks read that first report, then replace it on
+      // purpose, and a periodic refresh in the middle would cover the replacement.
+      BOT_GUILD_REPORT_MS: '600000',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -549,6 +575,73 @@ async function run() {
 
   /* 4. status filter: mark one planned, then filter it out */
   const admin = await arcade('POST', '/api/auth/login', { body: { name: 'memegodmidas', password: ADMIN_PASS } });
+
+  /* 4b. the console's server list: only the bot holds the Discord token, so it
+        reports the servers it is in and the owner's panel reads that report.
+        The list is what lets an owner pick a server and go try the commands in
+        it, so the names, the channel counts and the jump-off have to be right. */
+  const presenceList = await waitFor(async () => {
+    const res = await arcade('GET', '/api/admin/bot/guilds', { token: admin.payload.token });
+    return res.ok && res.payload?.guilds?.length ? res.payload : null;
+  }, 15000, "the bot's server list report");
+  const reported = presenceList.guilds || [];
+  check(reported.length === 2 && reported[0]?.name === 'Arcade Test Server',
+    "the bot reports every server it is in, the owner's first",
+    reported.map((g) => `${g.name}${g.owner ? ' (owner)' : ''}`).join(', '));
+  check(reported[0]?.channels === 3,
+    'a channel count comes from the channels Discord shows it', String(reported[0]?.channels));
+  check(reported[1]?.channels === null,
+    'a server that hides its channels still lists, just without a count', String(reported[1]?.channels));
+  check(presenceList.stale === false && presenceList.age >= 0,
+    'a fresh check-in is not marked stale', `stale ${presenceList.stale}, age ${presenceList.age}`);
+  check(presenceList.bot?.id === APP_ID && presenceList.bot?.username === 'memes-arcade-bot',
+    'the panel knows which bot reported', JSON.stringify(presenceList.bot));
+  check(String(presenceList.inviteUrl || '').includes(`client_id=${APP_ID}`)
+    && String(presenceList.inviteUrl).includes('applications.commands'),
+    'the panel gets an invite link for adding the bot to another server', presenceList.inviteUrl);
+  check(botLog.join('').includes('reported 2 servers to the arcade console'),
+    'the bot says what it reported', botLog.join('').split('\n').find((l) => l.includes('reported ')) || 'no report line');
+  check([...fake.channelLookups].sort().join(',') === '910000000000000001,910000000000000002',
+    'channels are read once per server, not guessed', fake.channelLookups.join(', '));
+
+  // Only staff may read the list, and only the bot may write it.
+  const fanPresence = await arcade('GET', '/api/admin/bot/guilds', { token: fan.token });
+  check(fanPresence.status === 403, 'the server list is staff-only', `status ${fanPresence.status}`);
+  const anonymousReport = await fetch(`${ARCADE}/api/bot/guilds`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ guilds: [] }),
+  });
+  check(anonymousReport.status === 401, 'reporting servers needs the bot secret', `status ${anonymousReport.status}`);
+
+  // A report is input, not gospel: bad ids, duplicates and walls of text are
+  // dropped or capped, and one report replaces the last - which is how a server
+  // the bot left disappears from the panel.
+  const crafted = await fetch(`${ARCADE}/api/bot/guilds`, {
+    method: 'POST',
+    headers: { 'x-bot-token': BOT_SECRET, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      appId: 'not-an-id',
+      username: 'memes-arcade-bot',
+      guilds: [
+        { id: '910000000000000001', name: 'Arcade Test Server', owner: true, channels: 3 },
+        { id: 'not-a-snowflake', name: 'bad' },
+        { id: '910000000000000001', name: 'duplicate' },
+        { id: '910000000000000009', name: `  ${'x'.repeat(300)}  `, channels: 9999 },
+      ],
+    }),
+  });
+  const craftedBody = await crafted.json();
+  check(crafted.status === 200 && craftedBody.count === 2,
+    'a bad server id is dropped and a repeated one kept once', JSON.stringify(craftedBody));
+  const afterCraft = (await arcade('GET', '/api/admin/bot/guilds', { token: admin.payload.token })).payload || {};
+  check((afterCraft.guilds || []).length === 2 && afterCraft.guilds.every((g) => g.name.length <= 80),
+    'a server name is flattened and capped', JSON.stringify(afterCraft.guilds));
+  check(afterCraft.guilds?.find((g) => g.id === '910000000000000009')?.channels === 500,
+    'an absurd channel count is capped', String(afterCraft.guilds?.find((g) => g.id === '910000000000000009')?.channels));
+  check(afterCraft.bot?.id === null && afterCraft.inviteUrl === null,
+    'a bad application id yields no invite link rather than a broken one',
+    `${afterCraft.bot?.id} / ${afterCraft.inviteUrl}`);
   await arcade('POST', `/api/admin/suggestions/${two.payload.suggestion.id}`, { token: admin.payload.token, body: { op: 'update', status: 'planned', note: 'On the roadmap.' } });
   const openOnly = await interact(fanUser, 'ideas', [{ name: 'status', value: 'open' }]);
   const openText = openOnly.message?.content || '';

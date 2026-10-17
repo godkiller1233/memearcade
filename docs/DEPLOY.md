@@ -126,6 +126,13 @@ stays stable across redeploys, which is exactly why it is set there: the
 Keep the bot off your public server's critical path - it can run on any machine
 that can reach the internet.
 
+The bot also reports the servers it is in (`POST /api/bot/guilds`, same bot
+secret), which is what fills **Admin console → 🤖 Discord bot → 🌐 Servers**.
+On a free service that sleeps, expect the list to show **stale** until the bot's
+next check-in (`BOT_GUILD_REPORT_MS`, five minutes by default) after the service
+wakes - a sleeping arcade cannot store anything. Nothing else needs to be opened
+up: the arcade never calls Discord, so no Discord credential lives on the server.
+
 Players can always type `!memearcade <command>` instead of waiting for the slash
 commands to roll out. That fallback reads channel messages, so tick **Message
 Content Intent** under the application's *Bot → Privileged Gateway Intents*.

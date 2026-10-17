@@ -116,6 +116,11 @@ export class Arcade {
     return this.request('POST', '/api/bot/link/check', { body: { code } });
   }
 
+  /** Bot bridge: the servers the bot is in, so the admin console can list them. */
+  reportGuilds({ appId, username, guilds }) {
+    return this.request('POST', '/api/bot/guilds', { body: { appId, username, guilds } });
+  }
+
   botUser(userToken) {
     return this.request('GET', '/api/bot/user', { userToken });
   }

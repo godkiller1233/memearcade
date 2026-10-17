@@ -106,6 +106,19 @@ export class DiscordRest {
   createDmChannel(userId) {
     return this.request('POST', '/users/@me/channels', { recipient_id: userId });
   }
+
+  /**
+   * The servers this bot is a member of (/users/@me/guilds). This is how the
+   * console learns the list: only the bot holds the Discord token.
+   */
+  guilds() {
+    return this.request('GET', '/users/@me/guilds');
+  }
+
+  /** One guild's channels - enough to say how many places the bot could speak. */
+  guildChannels(guildId) {
+    return this.request('GET', `/guilds/${encodeURIComponent(guildId)}/channels`);
+  }
 }
 
 /** Discord gateway close codes worth explaining in the logs. */

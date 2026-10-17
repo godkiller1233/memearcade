@@ -22,6 +22,9 @@ export function defaultData() {
     invites: {}, // code -> { party, by, expires }
     botLinks: {}, // discord user id -> arcade user id
     linkCodes: {}, // short code shown by the bot -> { full signed token, discordId, exp }
+    // Last server list the Discord bot reported: { at, appId, username, guilds }.
+    // Only the bot can read Discord, so this is the console's one source for it.
+    botPresence: null,
     reports: [], // { id, at, from, fromName, kind, text, status, resolvedBy, resolvedAt }
     suggestions: [], // { id, at, from, fromName, title, text, category, status, votes, adminNote }
     audit: [], // { at, actor, action, target, meta }

@@ -157,6 +157,42 @@ export function botSecret() {
   return cachedBotSecret;
 }
 
+/**
+ * One server in the bot's report, as the console will show it. The bot is the
+ * only writer, but its report is still treated as input: ids must be snowflakes,
+ * names are flattened and capped, and the icon hash is stripped to the characters
+ * a CDN path may hold. A row that fails is dropped rather than repaired, so a
+ * strange guild object can never break the panel or grow the data file.
+ */
+function guildPresence(raw) {
+  const id = String(raw?.id ?? '');
+  if (!/^\d{5,25}$/.test(id)) return null;
+  const name = String(raw?.name ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim().slice(0, 80);
+  // null means "the bot could not see this server's channels" and must stay
+  // null - Number(null) is 0, which would claim a server has nowhere to speak.
+  const channels = typeof raw?.channels === 'number' && Number.isFinite(raw.channels) ? raw.channels : null;
+  return {
+    id,
+    name: name || 'Unnamed server',
+    icon: typeof raw?.icon === 'string' ? raw.icon.replace(/[^a-z0-9_]/gi, '').slice(0, 64) || null : null,
+    owner: raw?.owner === true,
+    channels: channels === null ? null : Math.min(Math.max(0, Math.trunc(channels)), 500),
+  };
+}
+
+/** How old the bot's server list may be before the console warns it is stale. */
+const BOT_PRESENCE_STALE_MS = 15 * 60000;
+
+/**
+ * An invite link that adds the bot to another server. Send Messages is all it
+ * needs to post a reply; the slash commands need applications.commands, and the
+ * bot's own fallback needs Message Content enabled on the application.
+ */
+function botInviteUrl(appId) {
+  const q = new URLSearchParams({ client_id: appId, scope: 'bot applications.commands', permissions: '2048' });
+  return `https://discord.com/oauth2/authorize?${q}`;
+}
+
 function setCookie(ctx, token, days = 30) {
   const secure = ctx.req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
   ctx.res.setHeader(
@@ -1189,6 +1225,50 @@ export function registerApi(app, { rooms, hub }) {
     const user = getUser(tokenOf(ctx) ? sessionUser(tokenOf(ctx))?.user?.id : null);
     if (!user) throw new HttpError(401, 'Bad bot session.');
     return { ok: true, user: userPublic(user, { self: true }), friends: friendList(user.id) };
+  });
+
+  /**
+   * Bot bridge: the servers the bot is in. The bot is the only process holding a
+   * Discord token, so it reports the list here; the console reads it back. One
+   * report replaces the last one, so a server the bot left disappears with the
+   * next report - there is no second place to keep it.
+   */
+  app.post('/api/bot/guilds', (ctx) => {
+    requireBot(ctx);
+    const seen = new Set();
+    const guilds = [];
+    for (const raw of Array.isArray(ctx.body.guilds) ? ctx.body.guilds : []) {
+      if (guilds.length >= 60) break;
+      const guild = guildPresence(raw);
+      if (!guild || seen.has(guild.id)) continue;
+      seen.add(guild.id);
+      guilds.push(guild);
+    }
+    const appId = String(ctx.body.appId ?? '');
+    db.data.botPresence = {
+      at: now(),
+      appId: /^\d{5,25}$/.test(appId) ? appId : null,
+      username: typeof ctx.body.username === 'string' ? ctx.body.username.slice(0, 40) : null,
+      guilds,
+    };
+    db.touch();
+    return { ok: true, count: guilds.length };
+  });
+
+  /** Admin console: the last server list the bot reported, with its age and an invite link. */
+  app.get('/api/admin/bot/guilds', (ctx) => {
+    requireStaff(ctx, ROLES.admin);
+    const presence = db.data.botPresence || null;
+    const age = presence?.at ? Math.max(0, now() - presence.at) : null;
+    return {
+      ok: true,
+      at: presence?.at || null,
+      age,
+      stale: age === null || age > BOT_PRESENCE_STALE_MS,
+      bot: presence ? { id: presence.appId, username: presence.username } : null,
+      inviteUrl: presence?.appId ? botInviteUrl(presence.appId) : null,
+      guilds: presence?.guilds || [],
+    };
   });
 
 }

@@ -1071,7 +1071,12 @@ function drawAudit(draw, fail) {
  * ------------------------------------------------------------------ */
 
 function drawBot(draw, fail) {
-  api.get('/api/bot/secret').then((res) => {
+  // Two independent answers: the shared secret this server hands out, and the
+  // server list the bot last reported. One failing must not blank the other.
+  Promise.all([
+    api.get('/api/bot/secret'),
+    api.get('/api/admin/bot/guilds').catch(() => null),
+  ]).then(([res, presence]) => {
     draw([
       el('div', { class: 'card' },
         el('h3', { text: '🤖 Discord bot bridge' }),
@@ -1081,8 +1086,58 @@ function drawBot(draw, fail) {
           btn('Copy', () => navigator.clipboard?.writeText(res.secret).then(() => toast('Copied', 'good'), () => toast(res.secret)), { cls: 'sm' })),
         el('p', { class: 'muted small', text: 'On a hosted server set MEMES_BOT_SECRET instead so redeploys keep the same token.' }),
       ),
+      botServersCard(presence),
     ]);
   }).catch(fail);
+}
+
+/**
+ * The servers the bot is in, as the bot last reported them. This panel never
+ * talks to Discord: only the bot holds that token, so it reports the list and
+ * the console reads it. Each row opens the server so the owner can try the
+ * commands there - which is the only place they really run, with real channels
+ * and real permissions.
+ */
+function botServersCard(presence) {
+  const guilds = presence?.guilds || [];
+  const who = presence?.bot?.username;
+  const checkedIn = presence?.at
+    ? `Checked in ${timeAgo(presence.at)}${who ? ` as ${who}` : ''}.`
+    : 'The bot has not checked in yet.';
+  const empty = presence?.at
+    ? 'The bot is not in any server. Use the invite link above, then it will show up here on its next check-in.'
+    : 'Start the bot (npm run bot) - it reports its servers here as soon as it connects.';
+
+  return el('div', { class: 'card' },
+    el('div', { class: 'row spread' },
+      el('div', { class: 'row' },
+        el('h3', { text: '🌐 Servers' }),
+        pill(String(guilds.length), guilds.length ? 'good' : ''),
+        presence?.stale && presence?.at ? pill('stale', 'warn') : null),
+      presence?.inviteUrl
+        ? el('a', { class: 'btn sm', href: presence.inviteUrl, target: '_blank', rel: 'noopener noreferrer', text: '➕ Add to a server', style: { whiteSpace: 'nowrap' } })
+        : null),
+    el('p', { class: 'muted small', text: `${checkedIn} Open a server to try the commands in it, or copy the message command and paste it in a channel.` }),
+    presence?.stale && presence?.at
+      ? el('p', { class: 'muted small', text: 'That check-in is older than 15 minutes, so a server the bot joined or left since then may be missing. The list repairs itself on the next check-in.' })
+      : null,
+    guilds.length
+      ? el('div', { class: 'admin-scroll' },
+          el('table', { class: 'admin-table' },
+            el('tr', {}, ['Server', 'Text channels', ''].map((h) => el('th', { text: h }))),
+            guilds.map((g) => el('tr', {},
+              el('td', {}, el('div', { class: 'row' },
+                el('span', { text: g.name }),
+                g.owner ? pill('owner') : null,
+                el('code', { class: 'mono small', text: g.id }))),
+              el('td', { text: g.channels === null || g.channels === undefined ? '—' : fmtNum(g.channels) }),
+              el('td', {}, el('div', { class: 'row' },
+                el('a', { class: 'btn sm', href: `https://discord.com/channels/${g.id}`, target: '_blank', rel: 'noopener noreferrer', text: 'Open in Discord', style: { whiteSpace: 'nowrap' } }),
+                btn('Copy test', () => navigator.clipboard?.writeText('!memearcade help')
+                  .then(() => toast('Copied - paste it in that server', 'good'), () => toast('!memearcade help')), { cls: 'sm', title: 'Copy the message command to paste in this server' })))))))
+      : el('p', { class: 'muted', text: empty }),
+    el('p', { class: 'muted small', text: 'The bot reports this list every few minutes; this panel never calls Discord itself. Channel counts are the text, announcement and forum channels the bot can see - they are not a check that it may post in each one.' }),
+  );
 }
 
 /* ------------------------------------------------------------------ *
