@@ -30,6 +30,23 @@ const RESTART_DELAYS = [1000, 2000, 4000, 8000, 15000, 30000];
 /** How long the bot gets to answer SIGTERM before it is taken out. */
 const STOP_GRACE_MS = 4000;
 
+/**
+ * Exit codes the bot uses for failures it knows about (bot/index.js), so a
+ * restart reason on /api/health says "Discord rejected the token" instead of
+ * just "exited with code 3".
+ */
+const EXIT_NOTES = new Map([
+  [2, 'the bot refused its configuration (a missing or malformed setting)'],
+  [3, 'Discord rejected the token'],
+]);
+
+/** Human words for a child exit, for the banner and /api/health. */
+export function describeBotExit(code, signal = null) {
+  if (signal) return `stopped by ${signal}`;
+  const note = EXIT_NOTES.get(code);
+  return `exited with code ${code}${note ? ` - ${note}` : ''}`;
+}
+
 /** The same one `KEY=value` per line contract the server and bot both read. */
 export function readBotEnv(file = ENV_FILE) {
   const out = {};
@@ -86,8 +103,15 @@ export function startBot({ port, secret, host = config.host, log = () => {}, env
   // Read from the merged view too, so the switch works where people keep the
   // rest of the bot's settings: bot/.env.
   if (!autoStartEnabled(merged)) return notRunning('MEMES_BOT_AUTOSTART is off');
-  const token = String(merged.DISCORD_TOKEN || '').trim();
+  // A dashboard value pasted with a trailing newline or space is a token
+  // Discord rejects, and it looks identical to a correct one in the UI - so it
+  // is trimmed here, and the trimmed value is what the child is handed.
+  const rawToken = String(merged.DISCORD_TOKEN ?? '');
+  const token = rawToken.trim();
   if (!token) return notRunning('no DISCORD_TOKEN in bot/.env or the environment');
+  if (rawToken !== token) {
+    log('Discord bot: DISCORD_TOKEN had surrounding whitespace (a pasted newline?) - using the trimmed value');
+  }
   if (typeof WebSocket !== 'function') {
     return notRunning(`Node ${process.version} has no built-in WebSocket (the bot needs Node 22+)`);
   }
@@ -96,6 +120,9 @@ export function startBot({ port, secret, host = config.host, log = () => {}, env
   const url = botConnectionUrl(port, host);
   const childEnv = {
     ...merged,
+    // The trimmed token, so a newline pasted into the dashboard cannot make
+    // Discord answer 401 for a value that looks right in the UI.
+    DISCORD_TOKEN: token,
     // The site's own values, not whatever a stale bot/.env remembers: the
     // secret may have been rotated and the port is only known now.
     ARCADE_URL: url,
@@ -111,6 +138,8 @@ export function startBot({ port, secret, host = config.host, log = () => {}, env
   let restartTimer = null;
   let rapidFailures = 0;
   let startedAt = 0;
+  /** What /api/health and the banner report as the current state. */
+  let status = 'started with the site';
 
   const schedule = (reason) => {
     if (stopping || restartTimer) return;
@@ -118,10 +147,12 @@ export function startBot({ port, secret, host = config.host, log = () => {}, env
     if (lifespan >= STABLE_MS) rapidFailures = 0;
     rapidFailures += 1;
     if (rapidFailures > MAX_RAPID_FAILURES) {
-      log(`Discord bot: gave up after ${MAX_RAPID_FAILURES} failed starts (${reason}).`);
-      log('Discord bot: fix DISCORD_TOKEN in bot/.env, then restart the site - or run npm run bot by hand.');
+      status = `gave up after ${MAX_RAPID_FAILURES} failed starts (${reason})`;
+      log(`Discord bot: ${status}.`);
+      log('Discord bot: fix DISCORD_TOKEN on this service (or in bot/.env), then restart the site - or run npm run bot by hand.');
       return;
     }
+    status = `restarting: ${reason}`;
     const delay = RESTART_DELAYS[Math.min(rapidFailures - 1, RESTART_DELAYS.length - 1)];
     log(`Discord bot: ${reason} - restarting in ${Math.round(delay / 1000)}s`);
     restartTimer = setTimeout(() => {
@@ -149,6 +180,7 @@ export function startBot({ port, secret, host = config.host, log = () => {}, env
       return;
     }
     child = proc;
+    status = 'started with the site';
     log(`Discord bot: started (pid ${proc.pid}) against ${url}`);
     proc.once('error', (err) => {
       if (child === proc) child = null;
@@ -157,7 +189,7 @@ export function startBot({ port, secret, host = config.host, log = () => {}, env
     proc.once('exit', (code, signal) => {
       if (child === proc) child = null;
       if (stopping) return;
-      schedule(signal ? `stopped by ${signal}` : `exited with code ${code}`);
+      schedule(describeBotExit(code, signal));
     });
   };
 
@@ -199,8 +231,12 @@ export function startBot({ port, secret, host = config.host, log = () => {}, env
   start();
 
   return {
-    running: true,
-    reason: 'started with the site',
+    get running() {
+      return !!child && !stopping;
+    },
+    get reason() {
+      return status;
+    },
     get pid() {
       return child?.pid ?? null;
     },

@@ -28,7 +28,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { attachWebSocket } from '../server/lib/ws.js';
 import { Arcade } from '../bot/arcade.js';
-import { autoStartEnabled, botConnectionUrl, readBotEnv } from '../server/bot.js';
+import { autoStartEnabled, botConnectionUrl, describeBotExit, readBotEnv } from '../server/bot.js';
 import { DiscordGateway, FULL_INTENTS, SAFE_INTENTS } from '../bot/discord.js';
 import { arcadeEmbed, profileEmbed, formatChangelog, changelogLine, avatarImageUrl, levelColor, describeSwitches, featureOffReply, parseTextCommand, textCommandHelp, textFallbackHints, optionsToObject, TEXT_PREFIX } from '../bot/commands.js';
 import { pong } from '../web/games/engines/arcade.js';
@@ -83,6 +83,10 @@ const fake = {
     { id: '910000000000000001', name: 'Arcade Test Server', icon: 'abcdef0123456789abcdef0123456789', owner: true },
   ],
   channelLookups: [], // guild ids whose channel list was asked for
+  // When set, /users/@me only answers a bot that sends exactly this token -
+  // which is how the checks prove a token pasted with stray whitespace is
+  // trimmed before it is used (Discord would answer 401 for `Bot x `).
+  expectedToken: null,
 };
 
 const readBody = (req) => new Promise((resolve) => {
@@ -109,6 +113,9 @@ function startFakeDiscord() {
       res.end(JSON.stringify(payload));
     };
     if (url.pathname === '/api/v10/users/@me') {
+      if (fake.expectedToken && req.headers.authorization !== `Bot ${fake.expectedToken}`) {
+        return json(401, { message: '401: Unauthorized' });
+      }
       return json(200, { id: APP_ID, username: 'memes-arcade-bot', discriminator: '0' });
     }
     if (url.pathname === '/api/v10/gateway/bot') {
@@ -461,6 +468,9 @@ async function startArcade() {
 
 async function startBot() {
   console.log(`Starting the bot against the fake Discord on port ${FAKE_PORT}…`);
+  // From here on the fake Discord only answers a correctly formed token,
+  // exactly as Discord does.
+  fake.expectedToken = 'fake-token';
   bot = spawn(process.execPath, [path.join(ROOT, 'bot', 'index.js')], {
     cwd: ROOT,
     env: {
@@ -1465,11 +1475,21 @@ async function checkAutoStart() {
   check(parsed.DISCORD_TOKEN === 'quoted-token' && parsed.ARCADE_URL === 'http://example.test:1' && !('a comment' in parsed),
     'the website reads bot/.env with the same rules the bot does', JSON.stringify(parsed));
 
+  // Health is where a bot that never came online has to be visible, so the
+  // reason has to be there too - starting with the switch this suite turns off.
+  const offHealth = await (await fetch(`${ARCADE}/api/health`)).json();
+  check(offHealth.bot?.running === false && /MEMES_BOT_AUTOSTART/.test(offHealth.bot?.reason || ''),
+    'health says the bot is off and why (the switch)', JSON.stringify(offHealth.bot));
+
   rmSync(AUTO_DATA, { recursive: true, force: true });
   const beforeIdentified = fake.identified;
   const beforeConnections = fake.connections.size;
   const logs = [];
   const url = `http://127.0.0.1:${AUTO_PORT}`;
+  // This token is pasted with the stray whitespace a hosting dashboard keeps,
+  // and the fake Discord only answers the trimmed one - so the bot only comes
+  // online if the site (and the bot) trim before using it.
+  fake.expectedToken = 'auto-token';
   const auto = spawn(process.execPath, [path.join(ROOT, 'server', 'index.js')], {
     cwd: ROOT,
     env: {
@@ -1482,7 +1502,7 @@ async function checkAutoStart() {
       MEMES_BOT_SECRET: `${BOT_SECRET}-auto`,
       MEMES_BOT_AUTOSTART: 'on',
       // Only the token: the URL and the secret below are the site's own.
-      DISCORD_TOKEN: 'fake-token',
+      DISCORD_TOKEN: '  auto-token\n',
       DISCORD_API_BASE: `http://127.0.0.1:${FAKE_PORT}/api/v10`,
       DISCORD_GATEWAY_URL: `ws://127.0.0.1:${FAKE_PORT}/gateway`,
       BOT_FEATURE_TTL_MS: '0',
@@ -1517,6 +1537,12 @@ async function checkAutoStart() {
     check(/Discord bot \.\.\.\.\.\. started with the site/.test(output),
       'the banner says the bot is running with the site',
       output.split('\n').filter((l) => /Discord bot/i.test(l)).slice(-2).join(' | '));
+    check(/surrounding whitespace/.test(output),
+      'the site noticed the token had stray whitespace and trimmed it',
+      output.split('\n').filter((l) => /whitespace/i.test(l)).slice(-1).join(' | '));
+    const runningHealth = await (await fetch(`${url}/api/health`)).json();
+    check(runningHealth.bot?.running === true && /started with the site/.test(runningHealth.bot?.reason || ''),
+      'health says the bot is running', JSON.stringify(runningHealth.bot));
   } finally {
     await stopChild(auto);
   }
@@ -1526,6 +1552,70 @@ async function checkAutoStart() {
     .catch(() => false);
   check(gone, 'stopping the site stops the bot it started (no duplicate left online)',
     `${fake.connections.size} gateway connection(s) left, expected ${beforeConnections}`);
+
+  // A token Discord rejects has its own exit code, so a supervisor - and the
+  // /api/health line that reads its words - can say "Discord rejected the
+  // token" instead of "exited with code 1".
+  fake.expectedToken = 'only-this-token';
+  const rejectedLog = [];
+  const rejected = spawn(process.execPath, [path.join(ROOT, 'bot', 'index.js')], {
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      DISCORD_TOKEN: 'not-the-token',
+      ARCADE_BOT_SECRET: BOT_SECRET,
+      ARCADE_URL: ARCADE,
+      DISCORD_API_BASE: `http://127.0.0.1:${FAKE_PORT}/api/v10`,
+      DISCORD_GATEWAY_URL: `ws://127.0.0.1:${FAKE_PORT}/gateway`,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  rejected.stderr.on('data', (b) => rejectedLog.push(String(b)));
+  const rejectedCode = await new Promise((resolve) => rejected.once('exit', (code) => resolve(code)));
+  check(rejectedCode === 3, 'a token Discord rejects exits with its own code (3)', String(rejectedCode));
+  check(describeBotExit(3) === 'exited with code 3 - Discord rejected the token'
+    && /configuration/.test(describeBotExit(2))
+    && describeBotExit(1) === 'exited with code 1'
+    && describeBotExit(null, 'SIGKILL') === 'stopped by SIGKILL',
+    'the supervisor turns that code into words for the banner and health', describeBotExit(3));
+  check(/Discord rejected the bot token/.test(rejectedLog.join('')),
+    'and the reason is on stderr for the host log', rejectedLog.join('').trim().split('\n').slice(-1)[0] || '(nothing)');
+  fake.expectedToken = null;
+
+  // And the other invisible case: a service with the switch on but no token at
+  // all must say exactly that on /api/health, not just look quiet.
+  fake.expectedToken = null;
+  const noToken = spawn(process.execPath, [path.join(ROOT, 'server', 'index.js')], {
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      MEMES_PORT: String(AUTO_PORT),
+      MEMES_HOST: '127.0.0.1',
+      MEMES_DATA: AUTO_DATA,
+      MEMES_PLATFORM: 'bot-check',
+      MEMES_ADMIN_PASS: ADMIN_PASS,
+      MEMES_BOT_SECRET: `${BOT_SECRET}-auto`,
+      MEMES_BOT_AUTOSTART: 'on',
+      // No DISCORD_TOKEN on purpose.
+      DISCORD_API_BASE: `http://127.0.0.1:${FAKE_PORT}/api/v10`,
+      DISCORD_GATEWAY_URL: `ws://127.0.0.1:${FAKE_PORT}/gateway`,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  try {
+    await waitFor(async () => {
+      try {
+        return (await fetch(`${url}/api/health`)).ok;
+      } catch {
+        return false;
+      }
+    }, 20000, 'the no-token arcade');
+    const health = await (await fetch(`${url}/api/health`)).json();
+    check(health.bot?.running === false && /DISCORD_TOKEN/.test(health.bot?.reason || ''),
+      'a service with no token says so on /api/health', JSON.stringify(health.bot));
+  } finally {
+    await stopChild(noToken);
+  }
   rmSync(AUTO_DATA, { recursive: true, force: true });
 }
 

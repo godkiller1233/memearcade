@@ -305,7 +305,19 @@ function catalogFor(ctx) {
  * Routes
  * ------------------------------------------------------------------ */
 
-export function registerApi(app, { rooms, hub }) {
+export function registerApi(app, { rooms, hub, bot = null }) {
+  /**
+   * What happened to the Discord bot process: "started with the site",
+   * "restarting: exited with code 1", "gave up after 5 failed starts (...)", or
+   * the reason it never started at all (no token, the switch is off). It is on
+   * the public health payload on purpose - a bot that never comes online is
+   * otherwise invisible unless someone reads the host's logs.
+   */
+  const botStatus = () => {
+    const state = bot?.current;
+    if (!state) return { running: false, reason: 'the bot starts after the server listens' };
+    return { running: !!state.running, reason: String(state.reason || '') };
+  };
   /* ---------------- meta / health ---------------- */
 
   app.get('/api/health', () => ({
@@ -314,6 +326,7 @@ export function registerApi(app, { rooms, hub }) {
     // Which store is actually live: a configured Postgres that fell back to
     // the JSON file is a durability problem the uptime check should show.
     store: db.kind,
+    bot: botStatus(),
     now: now(),
     uptime: process.uptime(),
     rooms: rooms.rooms.size,

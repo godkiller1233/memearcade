@@ -1076,7 +1076,10 @@ function drawBot(draw, fail) {
   Promise.all([
     api.get('/api/bot/secret'),
     api.get('/api/admin/bot/guilds').catch(() => null),
-  ]).then(([res, presence]) => {
+    // The bot process itself, not just its last report: a bot that never came
+    // online must say so here rather than looking like a quiet server list.
+    api.get('/api/health').catch(() => null),
+  ]).then(([res, presence, health]) => {
     draw([
       el('div', { class: 'card' },
         el('h3', { text: '🤖 Discord bot bridge' }),
@@ -1086,7 +1089,7 @@ function drawBot(draw, fail) {
           btn('Copy', () => navigator.clipboard?.writeText(res.secret).then(() => toast('Copied', 'good'), () => toast(res.secret)), { cls: 'sm' })),
         el('p', { class: 'muted small', text: 'On a hosted server set MEMES_BOT_SECRET instead so redeploys keep the same token.' }),
       ),
-      botServersCard(presence),
+      botServersCard(presence, health),
     ]);
   }).catch(fail);
 }
@@ -1098,9 +1101,11 @@ function drawBot(draw, fail) {
  * commands there - which is the only place they really run, with real channels
  * and real permissions.
  */
-function botServersCard(presence) {
+function botServersCard(presence, health = null) {
   const guilds = presence?.guilds || [];
   const left = presence?.left || [];
+  const botProbe = health?.bot || null;
+  const botOff = botProbe && !botProbe.running;
   const who = presence?.bot?.username;
   const checkedIn = presence?.at
     ? `Checked in ${timeAgo(presence.at)}${who ? ` as ${who}` : ''}.`
@@ -1115,11 +1120,15 @@ function botServersCard(presence) {
         el('h3', { text: '🌐 Servers' }),
         pill(String(guilds.length), guilds.length ? 'good' : ''),
         left.length ? pill(`${left.length} left`, '') : null,
+        botProbe ? pill(botProbe.running ? 'bot running' : 'bot off', botProbe.running ? 'good' : 'warn') : null,
         presence?.stale && presence?.at ? pill('stale', 'warn') : null),
       presence?.inviteUrl
         ? el('a', { class: 'btn sm', href: presence.inviteUrl, target: '_blank', rel: 'noopener noreferrer', text: '➕ Add to a server', style: { whiteSpace: 'nowrap' } })
         : null),
     el('p', { class: 'muted small', text: `${checkedIn} Open a server to try the commands in it, or copy the message command and paste it in a channel.` }),
+    botOff
+      ? el('p', { class: 'muted', text: `⚠️ The bot process is not running: ${botProbe.reason || 'no reason reported'}. The list below is the last check-in it managed, so it may be out of date. Fix the token on this service (or in bot/.env) and restart the site.` })
+      : null,
     presence?.stale && presence?.at
       ? el('p', { class: 'muted small', text: 'That check-in is older than 15 minutes, so a server the bot joined or left since then may be missing. The list repairs itself on the next check-in.' })
       : null,

@@ -197,6 +197,35 @@ next check-in (`BOT_GUILD_REPORT_MS`, five minutes by default) after the service
 wakes - a sleeping arcade cannot store anything. Nothing else needs to be opened
 up: the token stays in the server process, never in the browser or the database.
 
+### The bot is not online: ask /api/health first
+
+A bot that never comes online is invisible unless you read the host's logs -
+so the health endpoint answers the question directly:
+
+```bash
+curl https://<service-name>.onrender.com/api/health
+# {"ok":true,"store":"postgres","bot":{"running":false,"reason":"exited with code 3 - Discord rejected the token"},...}
+```
+
+`bot.reason` is the whole story:
+
+- `no DISCORD_TOKEN in bot/.env or the environment` - the variable is missing on
+  *this service*. A `bot/.env` on your PC is not deployed with it.
+- `MEMES_BOT_AUTOSTART is off` - the switch that keeps a home-run bot from being
+  duplicated here is on.
+- `exited with code 3 - Discord rejected the token` - the token is wrong, or it
+  belongs to a different application. A token pasted with a trailing newline is
+  trimmed (the log says when that happened), but a genuinely wrong token cannot
+  be fixed from here: reset it in the Developer Portal and paste the new one.
+- `gave up after 5 failed starts (...)` - five quick failures in a row and the
+  supervisor stops retrying, so a broken configuration cannot hammer Discord.
+  Fix the token and **restart the service**; it does not re-arm itself.
+- `started with the site` plus `running: true` - the bot is up. If Discord still
+  shows it offline, the service is asleep: send the arcade a request to wake it.
+
+**Admin console → 🤖 Discord bot** shows the same state beside the server list
+(`bot running` / `bot off` with the reason), so nobody has to open a terminal.
+
 Players can always type `!memearcade <command>` instead of waiting for the slash
 commands to roll out. That fallback reads channel messages, so tick **Message
 Content Intent** under the application's *Bot → Privileged Gateway Intents*.

@@ -133,6 +133,12 @@ the banner and the server log say why.
 - **Turn it off** with `MEMES_BOT_AUTOSTART=off` in the site's environment or
   `bot/.env` when the bot runs somewhere else (another PC, a background worker).
   Two copies both answer interactions, so this is the switch to use.
+- **It says why it is off.** `/api/health` reports the process, not just the
+  last server list: `"bot":{"running":true,"reason":"started with the site"}`,
+  or the reason instead - no token, `MEMES_BOT_AUTOSTART=off`, `exited with code
+  3 - Discord rejected the token`, `gave up after 5 failed starts (...)`. The
+  admin console's Discord bot panel shows the same state. A token pasted with a
+  trailing newline is trimmed, and the log says when that happened.
 - **Run it by hand** with `npm run bot` when the bot should outlive the site or
   talk to a deployed one. A hand-run bot reads `ARCADE_BOT_SECRET` from
   `bot/.env`; a site-started one is given the site's own secret.

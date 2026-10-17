@@ -39,13 +39,21 @@ function loadDotEnv(file = path.join(HERE, '.env')) {
 }
 loadDotEnv();
 
+/**
+ * Environment values are trimmed: a token pasted into a hosting dashboard can
+ * carry a trailing newline or space, and Discord answers 401 for `Bot x `
+ * exactly as it does for a wrong token - the failure looks like a bad token
+ * rather than a stray character.
+ */
+const clean = (value) => String(value ?? '').trim();
+
 const config = {
-  discordToken: process.env.DISCORD_TOKEN || '',
-  botSecret: process.env.ARCADE_BOT_SECRET || '',
-  arcadeUrl: process.env.ARCADE_URL || 'http://127.0.0.1:8787',
-  guildId: process.env.DISCORD_GUILD_ID || '',
-  apiBase: process.env.DISCORD_API_BASE || 'https://discord.com/api/v10',
-  gatewayUrl: process.env.DISCORD_GATEWAY_URL || '',
+  discordToken: clean(process.env.DISCORD_TOKEN),
+  botSecret: clean(process.env.ARCADE_BOT_SECRET),
+  arcadeUrl: clean(process.env.ARCADE_URL) || 'http://127.0.0.1:8787',
+  guildId: clean(process.env.DISCORD_GUILD_ID),
+  apiBase: clean(process.env.DISCORD_API_BASE) || 'https://discord.com/api/v10',
+  gatewayUrl: clean(process.env.DISCORD_GATEWAY_URL),
   /**
    * How long the bot may trust the switch map it read.  Commands ask on every
    * invocation, so a short cache keeps that to one call; 0 reads the switches
@@ -96,12 +104,20 @@ function watchParent(pid = Number(process.env.BOT_PARENT_PID)) {
 }
 
 /**
+ * Exit codes the supervisor turns back into words. A hosted service that says
+ * "exited with code 3" is telling its owner "Discord rejected the token"
+ * without anyone having to read the container's logs.
+ */
+export const EXIT_CODES = { BAD_CONFIG: 2, TOKEN_REJECTED: 3 };
+
+/**
  * A fatal, expected failure: stop main() by throwing, so reportFatal() reports
  * it once instead of leaving no way out of the middle of startup.
  */
-function die(msg) {
+function die(msg, exitCode = EXIT_CODES.BAD_CONFIG) {
   const err = new Error(msg);
   err.fatal = true;
+  err.exitCode = exitCode;
   throw err;
 }
 
@@ -114,10 +130,11 @@ function die(msg) {
  * a last resort so a stuck handle cannot keep us online.
  */
 function reportFatal(err) {
-  process.exitCode = 1;
+  const code = Number(err?.exitCode) || 1;
+  process.exitCode = code;
   const text = err?.fatal ? err.message : err?.stack || err?.message || String(err);
   process.stderr.write(`[bot] ${text}\n`);
-  setTimeout(() => process.exit(1), 15000).unref();
+  setTimeout(() => process.exit(code), 15000).unref();
 }
 
 async function main() {
@@ -151,7 +168,7 @@ async function main() {
   try {
     me = await rest.me();
   } catch (err) {
-    die(`Discord rejected the bot token: ${err.message}`);
+    die(`Discord rejected the bot token: ${err.message}`, EXIT_CODES.TOKEN_REJECTED);
   }
   rest.applicationId = me.id; // for a bot, the application id is the user id
   log(`signed in to Discord as ${me.username}`);

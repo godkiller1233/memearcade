@@ -45,7 +45,11 @@ async function main() {
 
   const rooms = new GameRooms({});
   const hub = new RealtimeHub({ rooms });
-  registerApi(app, { rooms, hub });
+  // The bot is started after listen (it needs the real port), and /api/health
+  // must be able to say what happened to it - a bot that never comes online is
+  // otherwise invisible on a host whose logs nobody is reading.
+  const botState = { current: null };
+  registerApi(app, { rooms, hub, bot: botState });
   hub.attach(app.server);
   // Scheduled feature switches: push the change to open clients as windows
   // open and close.  The timer is unref'd, so it never holds the process open.
@@ -79,6 +83,7 @@ async function main() {
   // The Discord bot starts with the site, not by hand: it needs the real port
   // and the secret this server actually hands out, so it comes up after listen.
   const bot = startBot({ port: actualPort, host: config.host, secret: botSecret(), log });
+  botState.current = bot;
 
   banner(actualPort, admin, bot);
 
