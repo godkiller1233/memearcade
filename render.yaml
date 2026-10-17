@@ -56,8 +56,10 @@ services:
       - key: MEMES_ADMIN_USER
         value: memegodmidas
       # Keeps the Discord bot's shared secret stable across redeploys, because
-      # data/bot-secret.txt is wiped. Run the bot on your own PC against this
-      # service's public URL - see docs/DEPLOY.md ("Running the Discord bot").
+      # data/bot-secret.txt is wiped. The site starts the bot itself when
+      # DISCORD_TOKEN is set on this service; to run the bot on your own PC
+      # instead, set MEMES_BOT_AUTOSTART=off - see docs/DEPLOY.md ("The
+      # Discord bot").
       - key: MEMES_BOT_SECRET
         generateValue: true
       # Close registrations once your friends have signed up:

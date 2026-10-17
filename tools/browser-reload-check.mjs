@@ -194,6 +194,8 @@ async function startServer() {
       // rewrites it to prove an open tab notices a deploy.
       MEMES_ASSET_DIR: ASSETS,
       MEMES_PLATFORM: 'browser-reload',
+      // Never spend the developer's real Discord token on a scratch arcade.
+      MEMES_BOT_AUTOSTART: 'off',
       MEMES_ADMIN_PASS: process.env.MEMES_ADMIN_PASS || SCRATCH_ADMIN_PASS,
       // Party seats expire quickly here: the party-chat departure check must
       // watch a member actually fall off.  The room grace stays at its default

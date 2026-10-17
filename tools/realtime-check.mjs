@@ -135,7 +135,7 @@ async function startServer() {
     // A long waiting-room countdown keeps the suite in charge of when its rooms
     // start: the arming and clearing are asserted below, and no check waits for
     // an automatic start to fire.
-    env: { ...process.env, MEMES_PORT: String(PORT), MEMES_HOST: '127.0.0.1', MEMES_DATA: DATA, MEMES_PLATFORM: 'realtime-check', MEMES_PARTY_GRACE_MS: '700', MEMES_ROOM_GRACE_MS: '700', MEMES_AUTO_START_MS: '60000' },
+    env: { ...process.env, MEMES_PORT: String(PORT), MEMES_HOST: '127.0.0.1', MEMES_DATA: DATA, MEMES_PLATFORM: 'realtime-check', MEMES_BOT_AUTOSTART: 'off', MEMES_PARTY_GRACE_MS: '700', MEMES_ROOM_GRACE_MS: '700', MEMES_AUTO_START_MS: '60000' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stderr.on('data', (b) => process.stderr.write(`[server] ${b}`));

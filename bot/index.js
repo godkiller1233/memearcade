@@ -68,12 +68,60 @@ const config = {
 
 const log = (msg) => console.log(`[bot] ${msg}`);
 
+/** Replaced by main()'s shutdown once the gateway is up. */
+let stopNow = () => process.exit(0);
+
+/** How often the bot checks that the site it was started by is still there. */
+const PARENT_POLL_MS = 5000;
+
+/**
+ * The site starts this bot as its child and stops it with itself, but a SIGKILL,
+ * a crash or `node --watch` restarting the server cannot be handled. Left alone,
+ * the old bot would stay online as a duplicate answering every command twice.
+ * BOT_PARENT_PID is the site's pid; when it disappears, this process goes too.
+ * Only the site sets it - `npm run bot` has no parent to watch.
+ */
+function watchParent(pid = Number(process.env.BOT_PARENT_PID)) {
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  const timer = setInterval(() => {
+    try {
+      process.kill(pid, 0);
+    } catch (err) {
+      if (err?.code === 'EPERM') return; // alive, just not this user's to signal
+      log(`the arcade process (${pid}) is gone - stopping`);
+      stopNow();
+    }
+  }, PARENT_POLL_MS);
+  timer.unref?.();
+}
+
+/**
+ * A fatal, expected failure: stop main() by throwing, so reportFatal() reports
+ * it once instead of leaving no way out of the middle of startup.
+ */
 function die(msg) {
-  console.error(`[bot] ${msg}`);
-  process.exit(1);
+  const err = new Error(msg);
+  err.fatal = true;
+  throw err;
+}
+
+/**
+ * Print a fatal error and leave. No process.exit() here: on Windows it aborts
+ * while the arcade's keep-alive sockets are still open (libuv's
+ * "handle->flags & UV_HANDLE_CLOSING" assertion), which made a rejected token
+ * look like a crash. Setting the exit code and letting the loop drain exits as
+ * soon as stderr is written and the sockets idle out; the unref'd timer is only
+ * a last resort so a stuck handle cannot keep us online.
+ */
+function reportFatal(err) {
+  process.exitCode = 1;
+  const text = err?.fatal ? err.message : err?.stack || err?.message || String(err);
+  process.stderr.write(`[bot] ${text}\n`);
+  setTimeout(() => process.exit(1), 15000).unref();
 }
 
 async function main() {
+  watchParent();
   if (!config.discordToken) {
     die('DISCORD_TOKEN is missing. Put it in bot/.env (see bot/.env.example) or export it.');
   }
@@ -269,6 +317,7 @@ async function main() {
     gateway.stop();
     setTimeout(() => process.exit(0), 200).unref();
   };
+  stopNow = shutdown;
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 
@@ -276,10 +325,11 @@ async function main() {
   const fatalTimer = setInterval(() => {
     if (gateway.fatal) {
       clearInterval(fatalTimer);
-      die(`Discord gateway refused to start: ${gateway.fatal}`);
+      gateway.stop();
+      reportFatal(new Error(`Discord gateway refused to start: ${gateway.fatal}`));
     }
   }, 1000);
   fatalTimer.unref();
 }
 
-main().catch((err) => die(err.stack || err.message));
+main().catch(reportFatal);

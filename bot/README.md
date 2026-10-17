@@ -101,6 +101,30 @@ it again for every command (`BOT_FEATURE_TTL_MS`, default 10 seconds). If that
 read ever fails the command runs anyway and the server's own refusal is the
 reply - the bot can never be more open than the arcade.
 
+## Starting with the site
+
+`npm start` starts the bot too. When `DISCORD_TOKEN` is in `bot/.env` (or in the
+server's environment) the arcade launches `bot/index.js` once it is listening,
+hands it the port it actually bound and the bot secret it is using, and stops it
+on Ctrl+C. The startup banner names the bot and its pid; if it is not running,
+the banner and the server log say why.
+
+- **It restarts itself.** A dropped connection or an exit gets five attempts
+  with a growing delay (1s to 30s). After that it stops trying and logs the
+  cause - a rejected token, a missing intent, Node older than 22 - so the site
+  does not hammer Discord with a configuration that cannot work. Fix it and
+  restart the site.
+- **Only one copy.** If the site is killed without a chance to clean up
+  (SIGKILL, a crash, `node --watch` restarting it), the bot notices its parent
+  is gone within a few seconds and exits instead of staying online as a
+  duplicate that answers every command twice.
+- **Turn it off** with `MEMES_BOT_AUTOSTART=off` in the site's environment or
+  `bot/.env` when the bot runs somewhere else (another PC, a background worker).
+  Two copies both answer interactions, so this is the switch to use.
+- **Run it by hand** with `npm run bot` when the bot should outlive the site or
+  talk to a deployed one. A hand-run bot reads `ARCADE_BOT_SECRET` from
+  `bot/.env`; a site-started one is given the site's own secret.
+
 ## Setup
 
 1. Create an application at <https://discord.com/developers/applications>, add a
@@ -109,11 +133,10 @@ reply - the bot can never be more open than the arcade.
    (OAuth2 URL generator). Slash commands need no privileged intents; the
    `!memearcade` fallback in servers needs **Message Content Intent** (Bot →
    Privileged Gateway Intents), and works in DMs without it.
-3. Start the arcade and open **Admin console -> 🤖 Discord bot** to copy the
-   bot secret.
-4. `cp bot/.env.example bot/.env` and fill in `DISCORD_TOKEN` and
-   `ARCADE_BOT_SECRET` (see that file for the rest).
-5. `npm run bot`
+3. `cp bot/.env.example bot/.env` and fill in `DISCORD_TOKEN` (see that file for
+   the rest).
+4. `npm start` - the site starts the bot with it. **Admin console → 🤖 Discord
+   bot** shows the server list as soon as the bot connects.
 
 Set `DISCORD_GUILD_ID` while testing: guild commands appear instantly, global
 ones can take up to an hour to show up the first time.
@@ -141,6 +164,12 @@ player's DMs are closed, and a vote and suggestion posted as the linked account.
 A second fake gateway closes the connection with 4014 unless the privileged
 intent is dropped, which proves the bot reconnects and keeps serving instead of
 dying on an unconfigured app.
+
+It also covers starting with the site: a second arcade boots with only
+`DISCORD_TOKEN` in its environment, starts the bot by itself, and the fake
+gateway sees it identify and report its servers using the secret the site handed
+over. Stopping that arcade is checked to take the bot with it, so no duplicate
+is left online.
 
 It also covers the console's server list: the bot reads `/users/@me/guilds`,
 reports it with channel counts (and leaves the count blank when a server hides

@@ -119,6 +119,9 @@ async function startLocal() {
       MEMES_HOST: '127.0.0.1',
       MEMES_DATA: DATA,
       MEMES_PLATFORM: 'perm-check',
+      // A developer's real DISCORD_TOKEN must never send a bot to Discord for
+      // a scratch arcade; only bot-check starts one, against its fake gateway.
+      MEMES_BOT_AUTOSTART: 'off',
       MEMES_ADMIN_PASS: process.env.MEMES_ADMIN_PASS || SCRATCH_ADMIN_PASS,
     },
     stdio: ['ignore', 'pipe', 'pipe'],

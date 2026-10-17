@@ -44,6 +44,10 @@ const IS_HOST = fs.existsSync(SERVER_BUNDLE);
 
 /** A scratch port range of its own; the other suites use 8791-8910. */
 const PORT_RANGE = { start: 8911, span: 20 };
+// The host-mode server is a real server, and it now starts the Discord bot
+// when a token is present. This suite must never send a real bot to Discord
+// from a temp profile, so it opts the child out before main.js reads the env.
+process.env.MEMES_BOT_AUTOSTART = 'off';
 
 let failures = 0;
 let passed = 0;

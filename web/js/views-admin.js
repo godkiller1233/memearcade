@@ -1080,7 +1080,7 @@ function drawBot(draw, fail) {
     draw([
       el('div', { class: 'card' },
         el('h3', { text: '🤖 Discord bot bridge' }),
-        el('p', { class: 'muted small', text: 'Put this in bot/.env as ARCADE_BOT_SECRET. The bot sends it as the X-Bot-Token header to link accounts and post results.' }),
+        el('p', { class: 'muted small', text: 'The site starts the bot itself when DISCORD_TOKEN is in bot/.env (or the server environment), and hands it this secret. Running the bot by hand instead? Put it in bot/.env as ARCADE_BOT_SECRET.' }),
         el('div', { class: 'row' },
           el('code', { class: 'mono', text: res.secret }),
           btn('Copy', () => navigator.clipboard?.writeText(res.secret).then(() => toast('Copied', 'good'), () => toast(res.secret)), { cls: 'sm' })),
@@ -1106,7 +1106,7 @@ function botServersCard(presence) {
     : 'The bot has not checked in yet.';
   const empty = presence?.at
     ? 'The bot is not in any server. Use the invite link above, then it will show up here on its next check-in.'
-    : 'Start the bot (npm run bot) - it reports its servers here as soon as it connects.';
+    : 'The bot starts with the site when DISCORD_TOKEN is set - it reports its servers here as soon as it connects. Running it by hand? npm run bot.';
 
   return el('div', { class: 'card' },
     el('div', { class: 'row spread' },

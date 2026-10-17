@@ -21,12 +21,14 @@
  * protocol.
  */
 import { spawn } from 'node:child_process';
-import { rmSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { attachWebSocket } from '../server/lib/ws.js';
 import { Arcade } from '../bot/arcade.js';
+import { autoStartEnabled, botConnectionUrl, readBotEnv } from '../server/bot.js';
 import { DiscordGateway, FULL_INTENTS, SAFE_INTENTS } from '../bot/discord.js';
 import { arcadeEmbed, profileEmbed, formatChangelog, changelogLine, avatarImageUrl, levelColor, describeSwitches, featureOffReply, parseTextCommand, textCommandHelp, textFallbackHints, optionsToObject, TEXT_PREFIX } from '../bot/commands.js';
 import { pong } from '../web/games/engines/arcade.js';
@@ -41,6 +43,9 @@ const BOT_SECRET = 'bot-check-secret-4f9a2c7d1e28';
 const APP_ID = '900000000000000001';
 const ADMIN_PASS = 'bot-check-admin-2026';
 const ARCADE = `http://127.0.0.1:${ARCADE_PORT}`;
+// A second arcade, which starts its own bot, on ports the first one never uses.
+const AUTO_PORT = 8871 + Math.floor(Math.random() * 40);
+const AUTO_DATA = path.join(ROOT, 'data', 'bot-check-auto');
 
 let failures = 0;
 let passed = 0;
@@ -444,6 +449,9 @@ async function startArcade() {
       MEMES_PLATFORM: 'bot-check',
       MEMES_BOT_SECRET: BOT_SECRET,
       MEMES_ADMIN_PASS: ADMIN_PASS,
+      // This arcade is joined by the bot this suite starts by hand, against the
+      // fake gateway; the auto-start check boots its own arcade later.
+      MEMES_BOT_AUTOSTART: 'off',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -1338,6 +1346,97 @@ async function run() {
 }
 
 /* ------------------------------------------------------------------ *
+ * starting with the site
+ * ------------------------------------------------------------------ */
+
+/**
+ * The site starts the bot by itself: boot another arcade with a token and the
+ * auto-start switch on, and run nothing by hand. The fake gateway must see the
+ * bot identify, the bot's own log must show it reached the arcade with the
+ * secret the site handed over, and stopping that arcade must take the bot with
+ * it - an orphan would answer every command a second time.
+ */
+async function checkAutoStart() {
+  // The decisions, without a token having to exist on this machine.
+  check(autoStartEnabled({}) && autoStartEnabled({ MEMES_BOT_AUTOSTART: 'on' })
+    && !autoStartEnabled({ MEMES_BOT_AUTOSTART: 'off' }) && !autoStartEnabled({ MEMES_BOT_AUTOSTART: '0' }),
+    'the site starts the bot by default, and MEMES_BOT_AUTOSTART=off stops it');
+  check(botConnectionUrl(8877, '0.0.0.0') === 'http://127.0.0.1:8877'
+    && botConnectionUrl(8877, '::') === 'http://127.0.0.1:8877'
+    && botConnectionUrl(8877, '127.0.0.1') === 'http://127.0.0.1:8877',
+    'the bot is pointed at the real port, never the bind wildcard', botConnectionUrl(8877, '0.0.0.0'));
+  const envFile = path.join(os.tmpdir(), `bot-env-${process.pid}.env`);
+  writeFileSync(envFile, '# a comment\nDISCORD_TOKEN="quoted-token"\nARCADE_URL=http://example.test:1\n', 'utf8');
+  const parsed = readBotEnv(envFile);
+  rmSync(envFile, { force: true });
+  check(parsed.DISCORD_TOKEN === 'quoted-token' && parsed.ARCADE_URL === 'http://example.test:1' && !('a comment' in parsed),
+    'the website reads bot/.env with the same rules the bot does', JSON.stringify(parsed));
+
+  rmSync(AUTO_DATA, { recursive: true, force: true });
+  const beforeIdentified = fake.identified;
+  const beforeConnections = fake.connections.size;
+  const logs = [];
+  const url = `http://127.0.0.1:${AUTO_PORT}`;
+  const auto = spawn(process.execPath, [path.join(ROOT, 'server', 'index.js')], {
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      MEMES_PORT: String(AUTO_PORT),
+      MEMES_HOST: '127.0.0.1',
+      MEMES_DATA: AUTO_DATA,
+      MEMES_PLATFORM: 'bot-check',
+      MEMES_ADMIN_PASS: ADMIN_PASS,
+      MEMES_BOT_SECRET: `${BOT_SECRET}-auto`,
+      MEMES_BOT_AUTOSTART: 'on',
+      // Only the token: the URL and the secret below are the site's own.
+      DISCORD_TOKEN: 'fake-token',
+      DISCORD_API_BASE: `http://127.0.0.1:${FAKE_PORT}/api/v10`,
+      DISCORD_GATEWAY_URL: `ws://127.0.0.1:${FAKE_PORT}/gateway`,
+      BOT_FEATURE_TTL_MS: '0',
+      BOT_GUILD_REPORT_MS: '600000',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  auto.stdout.on('data', (b) => logs.push(String(b)));
+  auto.stderr.on('data', (b) => logs.push(String(b)));
+  try {
+    await waitFor(async () => {
+      try {
+        return (await fetch(`${url}/api/health`)).ok;
+      } catch {
+        return false;
+      }
+    }, 20000, 'the auto-start arcade');
+    const started = await waitFor(() => fake.identified > beforeIdentified, 15000, 'the site to start the bot')
+      .then(() => true)
+      .catch(() => false);
+    const output = logs.join('');
+    const botLines = output.split('\n').filter((l) => /bot/i.test(l)).slice(-2).join(' | ');
+    check(started, 'starting the site starts the bot - no npm run bot needed', botLines);
+    // The report proves both halves of the wiring: the address (the site's
+    // real port) and the secret (the one this server hands out, not a stale
+    // copy in bot/.env). A 401 here would log "report failed".
+    const reported = await waitFor(() => /reported 2 servers to the arcade console/.test(logs.join('')), 8000, 'the bot to report its servers')
+      .then(() => true)
+      .catch(() => false);
+    check(reported, 'the bot the site started reached the arcade with the secret the site handed it',
+      logs.join('').split('\n').filter((l) => /reported|report failed/i.test(l)).slice(-2).join(' | '));
+    check(/Discord bot \.\.\.\.\.\. started with the site/.test(output),
+      'the banner says the bot is running with the site',
+      output.split('\n').filter((l) => /Discord bot/i.test(l)).slice(-2).join(' | '));
+  } finally {
+    await stopChild(auto);
+  }
+
+  const gone = await waitFor(() => fake.connections.size === beforeConnections, 12000, 'the bot to disconnect')
+    .then(() => true)
+    .catch(() => false);
+  check(gone, 'stopping the site stops the bot it started (no duplicate left online)',
+    `${fake.connections.size} gateway connection(s) left, expected ${beforeConnections}`);
+  rmSync(AUTO_DATA, { recursive: true, force: true });
+}
+
+/* ------------------------------------------------------------------ *
  * main
  * ------------------------------------------------------------------ */
 
@@ -1349,6 +1448,7 @@ if (typeof WebSocket !== 'function') {
     await startArcade();
     await startBot();
     await run();
+    await checkAutoStart();
   } catch (err) {
     failures++;
     console.error(`\nBot check crashed: ${err.stack || err.message}`);

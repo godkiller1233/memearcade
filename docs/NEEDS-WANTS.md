@@ -182,6 +182,36 @@ and the 401 for a report without the bot secret, plus a crafted report proving
 bad ids are dropped, duplicates are kept once, names are capped at 80 characters
 and a nonsense application id yields no invite link.
 
+## Built on request: the bot starts with the site
+
+**Starting the bot was a second terminal, and forgetting it looked like the bot
+was down.**  `npm start` now starts `bot/index.js` too, as soon as the site is
+listening, and stops it on Ctrl+C.
+
+- **One command, one secret.**  The site hands the bot the port it actually
+  bound and the bot secret it is already using, so a fresh `bot/.env` needs only
+  `DISCORD_TOKEN`.  A hand-run `npm run bot` still reads
+  `ARCADE_BOT_SECRET` from `bot/.env`.
+- **It does not hammer Discord.**  A crash or a rejected token is retried five
+  times with a growing delay (1s to 30s), then the supervisor stops and logs the
+  cause instead of restarting a configuration that cannot work.
+- **No duplicate bot.**  If the site is killed without a chance to clean up
+  (SIGKILL, a crash, `node --watch` restarting it), the bot notices its parent
+  is gone within a few seconds and exits, rather than staying online and
+  answering every command a second time.  `MEMES_BOT_AUTOSTART=off` turns the
+  built-in copy off when the bot runs somewhere else.
+- **The banner is honest.**  It names the bot's pid when it is running, and the
+  reason when it is not - no token, Node older than 22, or the switch is off.
+- **It cannot spend a developer's token in a test.**  Every suite that boots a
+  scratch server (smoke, realtime, permissions, browser reload, desktop) now
+  sets `MEMES_BOT_AUTOSTART=off`; only `botcheck` starts one, against its fake
+  gateway.
+
+`npm run botcheck` grew from 204 to 211 checks: a second arcade with only
+`DISCORD_TOKEN` in its environment starts the bot by itself, the fake gateway
+sees it identify, the bot's log proves it reached that arcade with the secret
+the site handed over, and stopping that arcade is checked to disconnect the bot.
+
 ## Wanted next (not done)
 
 - **Friends: party invites have no lasting home.** A missed toast is gone for

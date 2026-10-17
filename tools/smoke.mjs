@@ -210,7 +210,7 @@ async function startLocal() {
     cwd: ROOT,
     // A fast schedule tick: the scheduled-switch checks cross a window boundary
     // in seconds and cannot wait for the production 20s sweep.
-    env: { ...process.env, MEMES_PORT: String(PORT), MEMES_HOST: '127.0.0.1', MEMES_DATA: DATA, MEMES_PLATFORM: 'smoke', MEMES_ADMIN_PASS: process.env.MEMES_ADMIN_PASS || SMOKE_ADMIN_PASS, MEMES_SCHEDULE_TICK_MS: '500' },
+    env: { ...process.env, MEMES_PORT: String(PORT), MEMES_HOST: '127.0.0.1', MEMES_DATA: DATA, MEMES_PLATFORM: 'smoke', MEMES_BOT_AUTOSTART: 'off', MEMES_ADMIN_PASS: process.env.MEMES_ADMIN_PASS || SMOKE_ADMIN_PASS, MEMES_SCHEDULE_TICK_MS: '500' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stderr.on('data', (b) => process.stderr.write(`[server] ${b}`));

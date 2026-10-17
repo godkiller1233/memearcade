@@ -17,6 +17,7 @@ import { createUser, getUserByName, setPassword, audit } from './store.js';
 import { GameRooms, loadEngines } from './games.js';
 import { RealtimeHub } from './realtime.js';
 import { registerApi, botSecret } from './api.js';
+import { startBot } from './bot.js';
 import { createScheduleSweeper } from './lib/schedule.js';
 import { API_VERSION, APP_VERSION } from '../shared/version.js';
 
@@ -73,10 +74,17 @@ async function main() {
   db.data.config.port = actualPort;
   db.touch();
 
-  banner(actualPort, admin);
+  // The Discord bot starts with the site, not by hand: it needs the real port
+  // and the secret this server actually hands out, so it comes up after listen.
+  const bot = startBot({ port: actualPort, host: config.host, secret: botSecret(), log });
 
-  const shutdown = (signal) => {
+  banner(actualPort, admin, bot);
+
+  const shutdown = async (signal) => {
     log(`${signal} received - shutting down`);
+    // Stop the bot first: it is the only process still talking to Discord, and
+    // an orphan would answer every command a second time.
+    await bot.stop();
     sweeper.stop();
     hub.shutdown();
     rooms.rooms.clear?.();
@@ -144,7 +152,7 @@ function lanAddresses() {
   return out;
 }
 
-function banner(port, admin) {
+function banner(port, admin, bot) {
   const lines = [];
   lines.push('');
   lines.push('   ███╗   ███╗███████╗███╗   ███╗███████╗███████╗');
@@ -171,6 +179,7 @@ function banner(port, admin) {
     lines.push(`   ADMIN ACCOUNT .... ${admin.user.name} (existing password unchanged)`);
   }
   lines.push(`   BOT SECRET ....... ${botSecret()}`);
+  lines.push(`   Discord bot ...... ${bot?.running ? `started with the site (pid ${bot.pid ?? '?'})` : `off - ${bot?.reason || 'no DISCORD_TOKEN'}`}`);
   lines.push('');
   if (config.onPlatform) {
     lines.push(`   Hosted mode ...... ${config.dataDir} is ephemeral unless a persistent disk is attached.`);
