@@ -10,8 +10,9 @@
  *   1. every service is legal on Render's Free compute plan - `type: web` with
  *      `plan: free`, no disk, no extra instances, no autoscaling, no paid-only
  *      fields, no field the platform itself refuses on a free instance, and at
- *      most one database, which must be `plan: free` (Render's free Postgres
- *      is limited to one per workspace and 1 GB)
+ *      most one database, which must be `plan: free` and carry no field a free
+ *      database refuses (Render's free Postgres is one per workspace, fixed at
+ *      1 GB, so even `diskSizeGB: 1` is rejected at apply time)
  *   2. the commands Render runs exist in package.json
  *   3. the health check path is one the server really serves
  *   4. every environment variable is one the code actually reads (catches
@@ -152,6 +153,16 @@ const PAID_FIELDS = ['disk', 'maintenanceMode', 'ipAllowList', 'scaling', 'previ
 const FREE_TIER_REJECTED = new Map([
   ['maxShutdownDelaySeconds', 'Render refuses it on a free instance ("max shutdown delay is not supported for free tier services")'],
 ]);
+
+/**
+ * The same trap on a Free database: the published schema allows `diskSizeGB`,
+ * but a free database's 1 GB is fixed and Render rejects the field outright
+ * ("plan Free cannot change disk size") - even when it names the 1 GB the plan
+ * already has. Omit it and the database comes up at 1 GB anyway.
+ */
+const FREE_DB_REJECTED = new Map([
+  ['diskSizeGB', 'Render refuses it on a free database ("plan Free cannot change disk size"); the free 1 GB is fixed, so omit the field'],
+]);
 const SECRET_NAME = /(PASS|PASSWORD|TOKEN|SECRET|_KEY$|APIKEY)/;
 
 /** Database properties a service may reference with `fromDatabase`. */
@@ -209,9 +220,8 @@ function main() {
     if (PAID_ESCAPE) continue;
     report(database.plan === 'free', `${label} asks for the free plan`,
       `plan: ${database.plan ?? '(unset - paid)'}`);
-    if (database.diskSizeGB !== undefined) {
-      report(Number(database.diskSizeGB) <= 1, `${label} stays within the free 1 GB`,
-        `diskSizeGB: ${database.diskSizeGB}`);
+    for (const [field, why] of FREE_DB_REJECTED) {
+      if (database[field] !== undefined) report(false, `${label} has no free-database-rejected field: ${field}`, why);
     }
   }
   if (!PAID_ESCAPE) {
@@ -230,8 +240,9 @@ function main() {
   if (!failures) {
     const plan = services.map((s) => `${s.name}=${s.plan}`).join(', ');
     const data = databases.length ? ` with ${databases.map((d) => `${d.name}=${d.plan}`).join(', ')}` : '';
+    const rejected = FREE_TIER_REJECTED.size + FREE_DB_REJECTED.size;
     report(true, 'the blueprint only asks for free resources',
-      `${plan}${data}; no disk, no extra instances, no paid-only fields, none of the ${FREE_TIER_REJECTED.size} field(s) Render refuses on free`);
+      `${plan}${data}; no disk, no extra instances, no paid-only fields, none of the ${rejected} field(s) Render refuses on free`);
   }
 
   console.log('\n[3/4] commands, health check and environment');

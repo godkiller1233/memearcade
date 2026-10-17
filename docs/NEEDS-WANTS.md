@@ -266,10 +266,12 @@ Postgres, and the server keeps its store there.
   `"store":"file-fallback"` from `/api/health`, so an uptime check can see the
   durability problem instead of only the owner noticing missing accounts.
 - **The blueprint check grew a database rule.**  `render.yaml` may now declare
-  at most one database, it must be `plan: free` and no larger than 1 GB, it has
-  to be handed to a service, and every `fromDatabase` reference has to name a
-  declared database and a real property. A paid database still fails the build
-  unless `MEMES_BLUEPRINT_PAID=1` is set.
+  at most one database, it must be `plan: free` and carry no field a free
+  database refuses (`diskSizeGB` included - Render rejects it even when it names
+  the 1 GB the free plan is fixed at), it has to be handed to a service, and
+  every `fromDatabase` reference has to name a declared database and a real
+  property. A paid database still fails the build unless
+  `MEMES_BLUEPRINT_PAID=1` is set.
 
 `npm run dbcheck` is new and covers both backends without a Postgres server: 25
 checks for the file seed/write/reload and backup fallback, the create/select/

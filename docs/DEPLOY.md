@@ -69,11 +69,14 @@ Three free-tier behaviours decide how the arcade feels:
   `/api/health` says `"store":"file-fallback"`. Upgrade before the date, not
   after.
 - **Some Blueprint fields are refused outright.** `maxShutdownDelaySeconds` is
-  rejected with "max shutdown delay is not supported for free tier services" -
-  the published schema allows the field, so it only fails at apply time and the
-  service never starts. The blueprint therefore leaves it out: SIGTERM still
-  reaches the server and it still closes (and flushes) its store on the way out,
-  within the free tier's own grace window.
+  rejected with "max shutdown delay is not supported for free tier services",
+  and `diskSizeGB` on the database with "plan Free cannot change disk size" -
+  even though both are in the published schema, so they only fail at apply time.
+  The blueprint leaves them out: SIGTERM still reaches the server (which closes
+  and flushes its store within the free tier's own grace window), and a Free
+  Postgres comes up at its fixed 1 GB on its own. `tools/blueprint-check.mjs`
+  treats both fields as free-tier-rejected, so re-adding one fails the build
+  instead of the apply.
 
 Render's own docs say free instances are for hobby projects - which is exactly
 what this is.
@@ -119,7 +122,8 @@ npm run blueprintcheck
 It parses `render.yaml` and proves everything in it is legal on the free plan
 (web service with `plan: free`, no disk, no autoscaling, one instance, no field
 Render refuses on a free instance, and at most one database, which must be
-`plan: free` and no larger than 1 GB), then checks the build/start commands, the
+`plan: free` and carry no field a free database refuses - `diskSizeGB` included),
+then checks the build/start commands, the
 health path, that the database is actually handed to the service, and every
 environment variable against the code. It runs in CI *and* inside the
 Blueprint's own build command, so a change that starts asking for paid resources

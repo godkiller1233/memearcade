@@ -85,6 +85,13 @@ services:
 databases:
   - name: memes-arcade-db
     plan: free
-    # Free Postgres tops out at 1 GB; asking for more is a paid plan.
-    diskSizeGB: 1
+    # No `diskSizeGB:` - Render refuses it on a free database ("plan Free cannot
+    # change disk size"), even when it names the 1 GB the free plan is fixed at.
+    # Omitted, a Free Postgres comes up at 1 GB on its own. The field is on the
+    # free-tier-rejected list in tools/blueprint-check.mjs, so putting it back
+    # fails the build instead of the Blueprint apply.
+    # No `postgresMajorVersion:` - Render's default (18) is what we want, and
+    # the version cannot be changed after the database is created.
+    # No `ipAllowList:` - the app connects over Render's private network from
+    # the service in the same workspace, so no external access is needed.
     postgresMajorVersion: "18"
