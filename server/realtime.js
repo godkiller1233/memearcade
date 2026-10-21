@@ -11,6 +11,7 @@ import { getEngine, engineCatalog } from './games.js';
 import { catalogWithEngines } from '../web/games/registry.js';
 import { featureAllowed, featureRefusal, gameAllowed, gameRefusal } from '../shared/features.js';
 import { publicConfig, catalogFor } from './lib/public-config.js';
+import { normalizeInstanceId } from './lib/discord-activity.js';
 import {
   acceptFriend,
   appendMessage,
@@ -853,11 +854,77 @@ export class RealtimeHub {
 
     // Turning rooms off stops *entering* a room; leaving, playing on and
     // rematches keep working so a live match is never cut in half.
-    if (op === 'create' || op === 'join') this.requireFeature(session, 'rooms');
+    if (op === 'create' || op === 'join' || op === 'instance') this.requireFeature(session, 'rooms');
     if (op === 'spectate') this.requireFeature(session, 'spectate');
     if (op === 'addBot') this.requireFeature(session, 'bots');
 
     switch (op) {
+      /**
+       * A Discord Activity room: everyone who opened the same instance is in the
+       * same room, so nobody has to read out a join code in a voice channel.
+       * With no gameId and no room yet the answer is "nothing started" - the
+       * Activity shows its picker. Once a room exists, a repeat call is a join,
+       * which is also how a player follows the host into a different game after
+       * the old room closed.
+       */
+      case 'instance': {
+        const instanceId = normalizeInstanceId(msg.instanceId);
+        if (!instanceId) throw new Error('That Discord Activity session is not valid - reopen the Activity.');
+        let target = this.rooms.findInstanceRoom(instanceId);
+        // The host changing the game closes the old room and opens a new one in
+        // its place; the other clients' poll follows them over. Anyone else's
+        // game choice is ignored - the host owns the room.
+        if (target && msg.gameId && msg.gameId !== target.gameId) {
+          if (target.host === me.id) {
+            this.rooms.close(target, 'game-changed');
+            session.roomId = null; // it no longer exists
+            target = null;
+          }
+        }
+        if (!target) {
+          if (!msg.gameId) {
+            if (current && current.status !== 'closed') this.leaveRoom(session, current);
+            session.roomId = null;
+            session.conn.send({ t: 'room:instance', instanceId, room: null });
+            return;
+          }
+          const engine = getEngine(msg.gameId);
+          if (!engine) throw new Error(`"${msg.gameId}" is not playable yet - check the catalog for status.`);
+          if (!gameAllowed(db.data.config, engine.meta.id, { role: me.role })) {
+            const err = new Error(gameRefusal(db.data.config, engine.meta.id, engine.meta.name));
+            err.code = 'feature-off';
+            err.expected = true;
+            throw err;
+          }
+          if (current && current.status !== 'closed') this.leaveRoom(session, current);
+          target = this.rooms.createRoom({
+            gameId: msg.gameId,
+            host: me,
+            // A private room: the instance is the invite, and it must not show
+            // up in the public server list for everyone else to wander into.
+            visibility: 'private',
+            options: msg.options || {},
+            instanceId,
+          });
+          session.roomId = target.id;
+          return;
+        }
+        if (current && current.id !== target.id && current.status !== 'closed') this.leaveRoom(session, current);
+        const seated = target.players.some((p) => p.id === me.id);
+        const watching = target.spectators.some((p) => p.id === me.id);
+        const fresh = session.roomId !== target.id;
+        session.roomId = target.id;
+        if (!seated && !watching) {
+          const full = target.players.length >= target.engine.meta.players.max + (target.engine.meta.maxBots || 0);
+          if (target.status === 'playing' || full) this.rooms.addSpectator(target, me);
+          else this.rooms.addPlayer(target, me);
+        } else if (fresh) {
+          // A repeat poll while seated is a no-op; a fresh socket (a reconnect)
+          // gets the room it is already part of without waking the others.
+          this.pushRoom(session);
+        }
+        return;
+      }
       case 'create': {
         const engine = getEngine(msg.gameId);
         if (!engine) throw new Error(`"${msg.gameId}" is not playable yet - check the catalog for status.`);

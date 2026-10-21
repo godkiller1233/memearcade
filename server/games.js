@@ -143,7 +143,7 @@ export class GameRooms {
 
   /* ---------------- creation ---------------- */
 
-  createRoom({ gameId, host, partyId = null, visibility = 'public', options = {}, seed = null }) {
+  createRoom({ gameId, host, partyId = null, visibility = 'public', options = {}, seed = null, instanceId = null }) {
     const engine = getEngine(gameId);
     if (!engine) throw new Error(`Unknown game "${gameId}".`);
     const id = newId(9);
@@ -154,6 +154,9 @@ export class GameRooms {
       engine,
       host: host?.id || null,
       partyId,
+      // Set for a Discord Activity room: everyone who opens the same instance
+      // lands here, and the next launch in that channel gets a new id.
+      instanceId,
       visibility,
       options,
       players: [],
@@ -187,6 +190,15 @@ export class GameRooms {
 
   getRoom(id) {
     return this.rooms.get(id) || null;
+  }
+
+  /** The live room for a Discord Activity instance, if one has been started. */
+  findInstanceRoom(instanceId) {
+    if (!instanceId) return null;
+    for (const room of this.rooms.values()) {
+      if (room.instanceId === instanceId && room.status !== 'closed') return room;
+    }
+    return null;
   }
 
   /* ---------------- membership ---------------- */
@@ -730,6 +742,7 @@ export class GameRooms {
       game: room.engine.meta,
       host: room.host,
       partyId: room.partyId,
+      instanceId: room.instanceId || null,
       visibility: room.visibility,
       status: room.status,
       // `connected` rides along so the room UI can grey a seat out while its
@@ -816,6 +829,7 @@ export class GameRooms {
       gameId: room.gameId,
       host: room.host,
       partyId: room.partyId,
+      instanceId: room.instanceId || null,
       visibility: room.visibility,
       status: room.status,
       playerCount: room.players.length,

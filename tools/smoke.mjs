@@ -17,9 +17,13 @@
  * target keeps the accounts and rooms the run creates. With the seeded owner
  * it also covers the idea-notify silence rules, the admin-only idea triage
  * rule and the shipped ideas changelog; a deployed target needs
- * MEMES_ADMIN_PASS for those (they are skipped otherwise).
+ * MEMES_ADMIN_PASS for those (they are skipped otherwise). The Discord
+ * Activity sign-in runs against a local stub of Discord's two endpoints: the
+ * server's real exchange, account provisioning and account linking, without a
+ * Discord app or the network.
  */
 import { spawn } from 'node:child_process';
+import http from 'node:http';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { signInGuest, describeGuestWait } from './lib/guest-signin.mjs';
 import { stopChild } from './lib/stop-child.mjs';
@@ -42,6 +46,14 @@ const DATA = path.join(ROOT, 'data', 'smoke');
 const SMOKE_ADMIN_PASS = 'smoke-admin-2026';
 /** A stand-in application id: the console's invite link is built from it. */
 const SMOKE_CLIENT_ID = '123456789012345678';
+const SMOKE_CLIENT_SECRET = 'smoke-discord-client-secret';
+const SMOKE_BOT_SECRET = 'smoke-bot-secret-4f9a2c7d1e28';
+/** Token exchange is the one Discord call the scratch run can stand in for. */
+const STUB_DISCORD_ID = '424242424242424242';
+const STUB_LINKED_ID = '424242424242424243';
+let discordStub = null;
+let stubBase = '';
+let lastTokenForm = null;
 const ADMIN_USER = process.env.MEMES_ADMIN_USER || 'memegodmidas';
 
 let failures = 0;
@@ -56,6 +68,60 @@ const check = (ok, label, detail = '') => {
   }
   return ok;
 };
+
+/**
+ * A local stand-in for the two Discord endpoints the Activity flow calls, so
+ * the scratch run proves the real server code end to end without a Discord
+ * application, a secret, or the network. It checks the exchange exactly as
+ * Discord would: the client id and secret must match, and a bad code is
+ * rejected in Discord's own error shape.
+ */
+function startDiscordStub() {
+  discordStub = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://stub');
+    const json = (status, body) => {
+      res.writeHead(status, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(body));
+    };
+    if (req.method === 'POST' && url.pathname === '/oauth2/token') {
+      let raw = '';
+      req.on('data', (chunk) => { raw += chunk; });
+      req.on('end', () => {
+        const form = new URLSearchParams(raw);
+        lastTokenForm = Object.fromEntries(form);
+        if (form.get('client_id') !== SMOKE_CLIENT_ID || form.get('client_secret') !== SMOKE_CLIENT_SECRET) {
+          return json(401, { error: 'invalid_client', error_description: 'Invalid client credentials.' });
+        }
+        if (form.get('grant_type') !== 'authorization_code') {
+          return json(400, { error: 'unsupported_grant_type' });
+        }
+        const code = form.get('code') || '';
+        if (!code || code === 'bad-code') return json(400, { error: 'invalid_grant', error_description: 'Invalid "code" in request.' });
+        return json(200, { access_token: `stub-access-${code}`, token_type: 'Bearer', scope: 'identify' });
+      });
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/v10/users/@me') {
+      const auth = String(req.headers.authorization || '');
+      const token = auth.replace(/^Bearer\s+/i, '');
+      if (token === 'stub-access-linked') {
+        return json(200, { id: STUB_LINKED_ID, username: 'smoke_linked', global_name: 'Smoke Linked' });
+      }
+      if (/^stub-access-/.test(token)) {
+        return json(200, { id: STUB_DISCORD_ID, username: 'smoke_discord', global_name: 'Smoke Player' });
+      }
+      return json(401, { message: '401: Unauthorized' });
+    }
+    return json(404, { message: `unhandled ${req.method} ${url.pathname}` });
+  });
+  return new Promise((resolve, reject) => {
+    discordStub.once('error', reject);
+    discordStub.listen(0, '127.0.0.1', () => {
+      stubBase = `http://127.0.0.1:${discordStub.address().port}`;
+      resolve(stubBase);
+    });
+  });
+}
 
 /* ------------------------------------------------------------------ *
  * tiny REST helper
@@ -212,7 +278,22 @@ async function startLocal() {
     cwd: ROOT,
     // A fast schedule tick: the scheduled-switch checks cross a window boundary
     // in seconds and cannot wait for the production 20s sweep.
-    env: { ...process.env, MEMES_PORT: String(PORT), MEMES_HOST: '127.0.0.1', MEMES_DATA: DATA, MEMES_PLATFORM: 'smoke', MEMES_BOT_AUTOSTART: 'off', MEMES_ADMIN_PASS: process.env.MEMES_ADMIN_PASS || SMOKE_ADMIN_PASS, MEMES_SCHEDULE_TICK_MS: '500', DISCORD_CLIENT_ID: SMOKE_CLIENT_ID },
+    env: {
+      ...process.env,
+      MEMES_PORT: String(PORT),
+      MEMES_HOST: '127.0.0.1',
+      MEMES_DATA: DATA,
+      MEMES_PLATFORM: 'smoke',
+      MEMES_BOT_AUTOSTART: 'off',
+      MEMES_ADMIN_PASS: process.env.MEMES_ADMIN_PASS || SMOKE_ADMIN_PASS,
+      MEMES_SCHEDULE_TICK_MS: '500',
+      MEMES_BOT_SECRET: SMOKE_BOT_SECRET,
+      DISCORD_CLIENT_ID: SMOKE_CLIENT_ID,
+      // Activities: the flow is real, the two Discord calls go to the stub.
+      DISCORD_CLIENT_SECRET: SMOKE_CLIENT_SECRET,
+      MEMES_DISCORD_API_BASE: `${stubBase}/api/v10`,
+      MEMES_DISCORD_OAUTH_URL: `${stubBase}/oauth2/token`,
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stderr.on('data', (b) => process.stderr.write(`[server] ${b}`));
@@ -299,7 +380,74 @@ async function run() {
     token = guestToken;
   }
 
-  /* 3c. idea notifications (silence rules) + the shipped-ideas changelog.
+  /* 3c. Discord Activity: the real sign-in flow against a stubbed Discord.
+        A deployed target has its own credentials and real Discord, which this
+        suite cannot drive, so those checks only run on the scratch server. */
+  if (target) {
+    console.log('⤼ activity checks skipped: they need the scratch server\'s Discord stub');
+  } else {
+    const actMeta = await api('GET', '/api/meta');
+    const actCfg = actMeta.payload?.config?.discordActivity || {};
+    check(actCfg.enabled === true && actCfg.clientId === SMOKE_CLIENT_ID,
+      'the Activity advertises its client id and is enabled', JSON.stringify(actCfg));
+
+    const exchanged = await api('POST', '/api/discord/activity/token', { code: 'code-1' });
+    check(exchanged.ok && exchanged.payload?.access_token === 'stub-access-code-1',
+      'the server exchanges the Discord code for an access token', exchanged.payload?.message);
+    check(lastTokenForm?.client_secret === SMOKE_CLIENT_SECRET && lastTokenForm?.grant_type === 'authorization_code',
+      'the exchange sends the client secret and grant type from the server', JSON.stringify(Object.keys(lastTokenForm || {})));
+    check(!lastTokenForm?.redirect_uri, 'the Activity exchange sends no redirect_uri (the SDK handles the return trip)');
+
+    const firstSession = await api('POST', '/api/discord/activity/session', {
+      access_token: 'stub-access-code-1', instanceId: 'smoke-instance-1', channelId: '910000000000000101', guildId: '910000000000000001',
+    });
+    check(firstSession.ok && !!firstSession.payload?.token && firstSession.payload?.created === true,
+      'a first Activity visit creates an arcade session', firstSession.payload?.message);
+    check(firstSession.payload?.user?.name === 'Smoke Player',
+      'the new account is named after the Discord player', firstSession.payload?.user?.name);
+    check(firstSession.payload?.discord?.id === STUB_DISCORD_ID && firstSession.payload?.instanceId === 'smoke-instance-1',
+      'the session carries the Discord identity and Activity instance', JSON.stringify({ discord: firstSession.payload?.discord, instance: firstSession.payload?.instanceId }));
+
+    const secondSession = await api('POST', '/api/discord/activity/session', { access_token: 'stub-access-code-1', instanceId: 'smoke-instance-1' });
+    check(secondSession.ok && secondSession.payload?.created === false
+      && secondSession.payload?.user?.id === firstSession.payload?.user?.id,
+      'coming back reuses the same arcade account', secondSession.payload?.message);
+
+    // A player who already linked an account keeps it: the Activity resolves
+    // through the same botLinks record /link writes.
+    const mine = await api('GET', '/api/auth/me');
+    const guestAccountId = mine.payload?.user?.id;
+    const linkStart = await fetch(`${base}/api/bot/link/start`, {
+      method: 'POST',
+      headers: { ...clientHeaders, 'content-type': 'application/json', 'x-bot-token': SMOKE_BOT_SECRET },
+      body: JSON.stringify({ discordId: STUB_LINKED_ID, discordName: 'Smoke Linked' }),
+    }).then((r) => r.json()).catch(() => null);
+    check(!!linkStart?.code, 'the bot can start a link for a Discord id', linkStart?.message);
+    if (linkStart?.code) {
+      const claimed = await api('POST', '/api/discord/claim', { code: linkStart.code });
+      check(claimed.ok, 'the signed-in player claims the Discord link', claimed.payload?.message);
+      const linkedSession = await api('POST', '/api/discord/activity/session', { access_token: 'stub-access-linked' });
+      check(linkedSession.ok && linkedSession.payload?.created === false
+        && linkedSession.payload?.user?.id === guestAccountId,
+        'an Activity sign-in lands on the linked account, not a new one',
+        `${linkedSession.payload?.user?.id} vs ${guestAccountId}`);
+    }
+
+    const badCode = await api('POST', '/api/discord/activity/token', { code: 'bad-code' });
+    check(badCode.status === 400 && /would not accept/i.test(badCode.payload?.message || ''),
+      'a rejected Discord code answers with Discord\'s reason', badCode.payload?.message);
+    const badToken = await api('POST', '/api/discord/activity/session', { access_token: 'not-a-token' });
+    check(badToken.status === 401, 'a token Discord does not know is refused', `status ${badToken.status}`);
+
+    const actPage = await fetch(`${base}/activity`);
+    const actHtml = await actPage.text();
+    check(actPage.ok && /MEMES/.test(actHtml), '/activity serves the arcade page for a direct visit', `status ${actPage.status}`);
+    const sdkRes = await fetch(`${base}/vendor/discord-sdk/index.mjs`);
+    check(sdkRes.ok && /javascript/.test(sdkRes.headers.get('content-type') || ''),
+      'the Discord Embedded App SDK is served as a module', `status ${sdkRes.status}, ${sdkRes.headers.get('content-type')}`);
+  }
+
+  /* 3d. idea notifications (silence rules) + the shipped-ideas changelog.
         Needs the owner account: scratch runs seed one, a deployed target
         needs MEMES_ADMIN_PASS set - otherwise this block is skipped. */
   const adminPass = process.env.MEMES_ADMIN_PASS || (target ? '' : SMOKE_ADMIN_PASS);
@@ -777,6 +925,7 @@ async function run() {
 try {
   let ready = true;
   if (!target) {
+    await startDiscordStub();
     await startLocal();
   } else {
     const health = await fetch(`${base}/api/health`).then((r) => r.json()).catch(() => null);
@@ -788,6 +937,7 @@ try {
   console.error(`\nSmoke test crashed: ${err.message}`);
 } finally {
   await stopLocal();
+  try { discordStub?.close(); } catch {}
   // Leave no scratch data behind: the stray-state check fails the build on any
   // suite that does (see tools/leak-check.mjs). Ignored in --target mode, where
   // no scratch dir was ever created.

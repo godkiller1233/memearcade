@@ -18,8 +18,10 @@ import { buildStamp } from './build.js';
 import { engineCatalog } from '../games.js';
 import { catalogWithEngines } from '../../web/games/registry.js';
 import { featureFlags, gameKept, gameState } from '../../shared/features.js';
+import { activitySettings } from './discord-activity.js';
 
 export function publicConfig(account = null) {
+  const activity = activitySettings();
   return {
     // Which build the server is serving.  A client keeps this as "the build I
     // booted from" and reloads when a later answer differs (web/js/build-watch.js),
@@ -34,6 +36,18 @@ export function publicConfig(account = null) {
     maxRooms: db.data.config.maxRooms,
     // Per-feature switches (on / hidden), already resolved for this viewer.
     features: featureFlags(db.data.config, new Date(), { role: account?.role }),
+    /**
+     * Playing inside Discord. The client id is public by design (it is the
+     * app's identity in the SDK handshake); the secret is never part of this
+     * shape - `enabled` is the answer to "can the sign-in be finished here?".
+     */
+    discordActivity: {
+      enabled: activity.enabled,
+      clientId: activity.clientId,
+      path: activity.path,
+      url: activity.url,
+      missing: activity.missing,
+    },
   };
 }
 

@@ -207,6 +207,61 @@ next check-in (`BOT_GUILD_REPORT_MS`, five minutes by default) after the service
 wakes - a sleeping arcade cannot store anything. Nothing else needs to be opened
 up: the token stays in the server process, never in the browser or the database.
 
+### 7. Games inside Discord (Activities)
+
+`/play` opens the whole arcade as a **Discord Activity** - the game runs in a
+panel next to the voice channel, and everyone who opens it from that channel is
+in the same room automatically. There is no join code to read out, and when the
+host picks another game the others follow.
+
+This needs two extra credentials from the same application, plus two switches in
+the Developer Portal. The bot keeps working without them; only `/play` and the
+Activity page need this setup.
+
+1. **Developer Portal → OAuth2.** Copy the **Client ID** and **Client Secret**.
+   Under *Redirects* add `https://127.0.0.1` as a placeholder - the Embedded App
+   SDK handles the return trip, and the server's token exchange sends no
+   `redirect_uri` (see the note below).
+2. **The service's Environment.** Set `DISCORD_CLIENT_ID` and
+   `DISCORD_CLIENT_SECRET` (both `sync: false` in `render.yaml`, so Render asks
+   for them), then redeploy. The id is public and travels to the Activity page;
+   the secret only ever lives in the server process - it is never sent to a
+   browser, embedded in a page, or stored in the database. The admin panel's
+   **🎮 Activities** card shows `ready` once both are set.
+3. **Developer Portal → Activities → Settings.** Tick **Enable Activities**.
+4. **Developer Portal → Activities → URL Mappings.** Add one mapping:
+   **prefix** `/`, **target** the service's host with **no protocol**
+   (`memes-arcade.onrender.com`). Discord's proxy loads the arcade's own root
+   page from there; the page notices the Discord frame and becomes the Activity
+   picker. Assets and the WebSocket ride the same mapping, which is why the
+   mapping must be `/` rather than a subfolder.
+
+Run `/play` in any text or voice channel. If the launch is refused, the bot
+posts the reason (usually step 3 or 4) and a link to play in a browser instead.
+
+Notes:
+
+- **Unverified Activities** only work for the app's team and in servers under
+  25 members. Discord verification is what lets the public play; that is an
+  account/application process outside this repo.
+- **No `redirect_uri` in the exchange.** Activities use the SDK's own code flow;
+  the placeholder above is required by the portal but is not part of the server's
+  request. A conventional website OAuth flow would need a real one.
+- **The mapping target is public HTTPS.** Discord's proxy loads the mapping from
+  the internet, so Activity testing on a laptop needs a tunnel (for example
+  `cloudflared tunnel --url http://127.0.0.1:8787`) in the mapping. `http://127.0.0.1`
+  is still fine for the website itself. Set `MEMES_PUBLIC_URL` to the public
+  origin so the admin card can show (and copy) the exact mapping target.
+- **The socket works through the proxy.** Discord's proxy supports WebSockets,
+  and the page opens `/ws` on its own origin, so rooms, chat and host streaming
+  need no Activity-specific transport.
+- **The secret is per deployment.** The same app powers the bot and the Activity,
+  so the token and these two values must come from the same Developer Portal
+  application.
+- **Sessions are ordinary arcade sessions.** The first visit quietly creates an
+  arcade account tied to the Discord id; a player who already ran `/link` keeps
+  using that account, so Activity play counts on their real profile.
+
 ### The bot is not online: ask /api/health first
 
 A bot that never comes online is invisible unless you read the host's logs -

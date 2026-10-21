@@ -205,6 +205,15 @@ Discord member whose linked account is a VIP. The bot has no arcade role to look
 at, and this failure mode is the safe one - the website and the API still serve
 the kept roles exactly.
 
+**Activities are the same arcade.** `/play` opens the site in a Discord Activity
+frame; the player signs in through Discord, but that only produces an ordinary
+arcade session, so every game, room and feature switch applies exactly as it
+does in a browser. The Activity room for a Discord instance is a normal room
+(marked private so it stays out of the public server list), and a feature the
+owner switched off refuses it on the same socket path as the website. A player
+who already linked an account with `/link` keeps that account's profile; a first
+visit creates one tied to the Discord id.
+
 ## Storage and enforcement
 
 * Switches live in `data/db.json` under `config.features` and `config.games`.

@@ -649,6 +649,48 @@ async function run(engine, OnlineHost) {
   check(pong?.ts === sentAt, 'the server echoes the ping timestamp for round-trip timing');
   check(Number.isFinite(pong?.serverTime) && Date.now() - sentAt < 2000, `the round trip answered in ${Date.now() - sentAt}ms`);
 
+  /* 0b. Discord Activity rooms: one room per Activity instance, no code. */
+  const instanceId = `inst${Date.now().toString(36)}`;
+  host.send({ t: 'room', op: 'instance', instanceId });
+  const nothing = await host.waitFor('room:instance', (m) => m.instanceId === instanceId, 3000);
+  check(nothing?.room === null, 'an Activity instance with no game answers "nothing started"');
+
+  host.send({ t: 'room', op: 'instance', instanceId, gameId: 'pong' });
+  const started = await host.waitFor('game', (m) => m.room?.instanceId === instanceId && m.room?.gameId === 'pong', 3000);
+  check(!!started, 'the host starts a game for the Activity instance', started ? '' : 'no room');
+  check(started?.room?.visibility === 'private', 'the instance room stays out of the public server list', started?.room?.visibility);
+
+  guestClient.send({ t: 'room', op: 'instance', instanceId });
+  const followed = await guestClient.waitFor('game', (m) => m.room?.id === started?.room?.id && m.room?.players?.length === 2, 3000);
+  check(!!followed, 'a second player joins the same Activity room without a code');
+
+  const beforeRepeat = guestClient.of('game').slice(-1)[0]?.room?.id;
+  guestClient.send({ t: 'room', op: 'instance', instanceId });
+  await sleep(250);
+  check(guestClient.of('game').slice(-1)[0]?.room?.id === beforeRepeat && guestClient.of('error').length === 0,
+    'a repeat instance poll keeps the same seat and room');
+
+  host.send({ t: 'room', op: 'instance', instanceId, gameId: 'tic-tac-toe' });
+  const switched = await host.waitFor('game', (m) => m.room?.instanceId === instanceId && m.room?.gameId === 'tic-tac-toe', 3000);
+  check(!!switched && switched.room.id !== started?.room?.id, 'the host switches the Activity to another game', switched?.room?.gameId);
+  const oldClosed = await guestClient.waitFor('room:closed', (m) => m.reason === 'game-changed', 3000);
+  check(!!oldClosed, 'everyone in the old room is told it closed');
+  guestClient.send({ t: 'room', op: 'instance', instanceId });
+  const rejoined = await guestClient.waitFor('game', (m) => m.room?.id === switched?.room?.id && m.room?.players?.length === 2, 3000);
+  check(!!rejoined, 'the others follow the host into the new room');
+
+  host.send({ t: 'room', op: 'instance', instanceId: 'not a valid id!' });
+  const invalid = await host.waitFor('error', (m) => /not valid/i.test(m.message || ''), 2000);
+  check(!!invalid, 'a malformed Activity instance id is refused', invalid?.message);
+
+  host.send({ t: 'room', op: 'leave' });
+  guestClient.send({ t: 'room', op: 'leave' });
+  await sleep(300);
+  // The instance section talked in the same two sockets; drop those frames so
+  // the next section's waitFor cannot match an older room's update.
+  host.messages.length = 0;
+  guestClient.messages.length = 0;
+
   /* 1. room + seats */
   host.send({ t: 'room', op: 'create', gameId: 'pong', visibility: 'public', options: { target: 5 } });
   const created = await host.waitFor('game', (m) => m.room?.gameId === 'pong' && m.room?.status === 'lobby');

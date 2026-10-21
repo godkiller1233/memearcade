@@ -56,12 +56,29 @@ export const config = {
   /** Comma separated origins; '*' allows everything (fine for LAN play). */
   corsOrigins: (env.MEMES_CORS_ORIGINS || '*').split(',').map((s) => s.trim()),
 
-  /** Discord bot bridge. */
+  /** Discord bot bridge + Activities. */
   discord: {
     token: env.DISCORD_TOKEN || '',
     appId: env.DISCORD_APP_ID || '',
     guildId: env.DISCORD_GUILD_ID || '',
     enabled: !!env.DISCORD_TOKEN,
+    /**
+     * Activities (games played inside Discord) need both halves of the app's
+     * OAuth2 credentials: the client id is public and travels to the browser,
+     * the secret never leaves this process. The id falls back to the app id,
+     * and botAppId() can decode it from DISCORD_TOKEN when neither is set.
+     */
+    clientId: String(env.DISCORD_CLIENT_ID || env.DISCORD_APP_ID || '').trim(),
+    clientSecret: String(env.DISCORD_CLIENT_SECRET || '').trim(),
+    /**
+     * The site's own /activity page. Discord's proxy serves the root instead
+     * (see docs/DEPLOY.md); this path is the same page opened directly, for
+     * checking what a player without Discord sees.
+     */
+    activityPath: '/activity',
+    /** Discord's REST base - overridable so the checks can stand in a fake. */
+    apiBase: String(env.MEMES_DISCORD_API_BASE || env.DISCORD_API_BASE || 'https://discord.com/api/v10').replace(/\/$/, ''),
+    oauthUrl: String(env.MEMES_DISCORD_OAUTH_URL || 'https://discord.com/api/oauth2/token'),
   },
 
   /**

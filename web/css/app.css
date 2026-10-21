@@ -922,3 +922,80 @@ input[type="time"].input { max-width: 130px; }
 .modal { position: fixed; inset: 0; background: rgba(4, 2, 14, 0.65); display: grid; place-items: center; z-index: 60; padding: 20px; }
 .modal-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; width: min(620px, 100%); max-height: 86vh; overflow-y: auto; box-shadow: var(--shadow); }
 .reduce-motion * { animation: none !important; transition: none !important; }
+
+/* ==========================================================================
+   Discord Activity
+   The page is the same app in an iframe next to a voice channel, so the site
+   chrome (nav, sidebar, footer) goes away and the game gets the whole frame.
+   ========================================================================== */
+
+body.activity-mode .topbar,
+body.activity-mode .sidebar,
+body.activity-mode .statusbar,
+body.activity-mode #chat-dock {
+  display: none;
+}
+
+body.activity-mode .app {
+  height: 100vh;
+  min-height: 0;
+}
+
+body.activity-mode .layout {
+  display: block;
+  padding: 46px 10px 10px;
+  overflow: auto;
+  min-height: 0;
+}
+
+body.activity-mode .view {
+  gap: 10px;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.activity-bar {
+  position: fixed;
+  inset: 0 0 auto 0;
+  z-index: 40;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.activity-bar-text {
+  font-size: 13px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.activity-games {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.activity-game {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 10px;
+  text-align: left;
+}
+
+.activity-game .icon {
+  font-size: 22px;
+}
+
+.activity-game-name {
+  font-weight: 600;
+}

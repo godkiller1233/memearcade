@@ -71,6 +71,15 @@ services:
       # `"bot":{"running":false,"reason":"no DISCORD_TOKEN ..."}`.
       - key: DISCORD_TOKEN
         sync: false
+      # Activities (games played inside Discord): /play opens the arcade in a
+      # panel in the channel. Both values come from the same Developer Portal
+      # application, OAuth2 page. The client id is public; the secret never
+      # leaves this service. Their absence does not stop the bot - only /play
+      # has no Activity to open. Setup: docs/DEPLOY.md, "Games inside Discord".
+      - key: DISCORD_CLIENT_ID
+        sync: false
+      - key: DISCORD_CLIENT_SECRET
+        sync: false
       # Keeps the Discord bot's shared secret stable across redeploys, because
       # data/bot-secret.txt is wiped. The site starts the bot itself when
       # DISCORD_TOKEN is set on this service; to run the bot on your own PC

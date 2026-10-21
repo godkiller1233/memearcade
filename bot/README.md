@@ -10,6 +10,7 @@ stuck waiting for Discord to roll the slash commands out.
 
 | Command | What it does |
 | --- | --- |
+| `/play` | Opens the **Memes Arcade Activity** in the channel: the games run in a panel next to the voice channel, and everyone who opens it from there shares the same room. The slash command is required - a text reply cannot open an Activity, so `!memearcade play` explains that instead. Setup: see "Activities" below. |
 | `/arcade player:` | Your linked account's level, XP, coins and match record - or any player's public profile with `player:`. |
 | `/profile player:` | The games you have played, per game, and the achievements you have earned - for your linked account or any player with `player:`. |
 | `/leaderboard sort: game:` | Top players by level (default), wins or games played - or one game's board with `game:` (name or id, e.g. `pong`), which ranks by the points that game awards each match (Pong books the margin of victory) and shows games played alongside. The `game:` option autocompletes from the live catalog as you type. |
@@ -26,6 +27,21 @@ up under your arcade name. Looking someone up (`/arcade player:name`,
 `/profile player:name`) needs no link at all - it reads the same public profile
 the website's player list shows, and a name that misses offers the closest
 matches.
+
+## Activities: `/play`
+
+An Activity is the arcade embedded in Discord. `/play` answers with Discord's
+`LAUNCH_ACTIVITY` callback (`type: 12`) instead of a message, so Discord opens
+the arcade in the channel - no deferred reply, no link to click. Everyone in
+that Activity instance lands in one room automatically; the host picks a game
+from the catalog and can switch games, and the others follow. The room is
+private, so it never appears in the website's public server list.
+
+The site needs its Discord OAuth2 credentials (`DISCORD_CLIENT_ID`,
+`DISCORD_CLIENT_SECRET`) and the app needs Activities enabled plus a `/` URL
+mapping - full steps in [docs/DEPLOY.md](../docs/DEPLOY.md), "Games inside
+Discord". Without them `/play` posts the reason and a browser link, and every
+other command keeps working.
 
 ## Text fallback: `!memearcade <command>`
 

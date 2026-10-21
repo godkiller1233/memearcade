@@ -83,6 +83,9 @@ const fake = {
     { id: '910000000000000001', name: 'Arcade Test Server', icon: 'abcdef0123456789abcdef0123456789', owner: true },
   ],
   channelLookups: [], // guild ids whose channel list was asked for
+  // Set to a message to make the fake reject LAUNCH_ACTIVITY callbacks, like
+  // an app whose owner never enabled Activities.
+  launchError: null,
   // When set, /users/@me only answers a bot that sends exactly this token -
   // which is how the checks prove a token pasted with stray whitespace is
   // trimmed before it is used (Discord would answer 401 for `Bot x `).
@@ -157,6 +160,9 @@ function startFakeDiscord() {
     }
     const callback = url.pathname.match(/^\/api\/v10\/interactions\/([^/]+)\/([^/]+)\/callback$/);
     if (req.method === 'POST' && callback) {
+      if (body?.type === 12 && fake.launchError) {
+        return json(400, { message: fake.launchError });
+      }
       fake.callbacks.set(callback[2], body);
       res.writeHead(204);
       return res.end();
@@ -313,6 +319,40 @@ async function interact(user, name, options = []) {
     await sleep(60);
   }
   throw new Error(`no reply to /${name}`);
+}
+
+/**
+ * Push /play and wait for its answer. Unlike other commands it has no edited
+ * message: a successful launch is the type-12 callback itself, and a refused
+ * one is a plain channel message, so both count as a reply.
+ */
+async function pushLaunch(user) {
+  const token = `ltoken-${++fake.seq}`;
+  const before = fake.channelMessages.length;
+  const conn = [...fake.connections][0];
+  if (!conn) throw new Error('the bot is not connected to the fake gateway');
+  conn.send({
+    op: 0,
+    t: 'INTERACTION_CREATE',
+    s: fake.seq++,
+    d: {
+      id: `i${fake.seq}`,
+      application_id: APP_ID,
+      type: 2,
+      token,
+      channel_id: 'chan-1',
+      data: { name: 'play', options: [] },
+      member: { user },
+    },
+  });
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    if (fake.callbacks.has(token)) return { callback: fake.callbacks.get(token), token };
+    const refusal = fake.channelMessages.slice(before).find((m) => /would not open the Activity/.test(m.body?.content || ''));
+    if (refusal) return { refusal, token };
+    await sleep(60);
+  }
+  throw new Error('no answer to /play');
 }
 
 /** Push an AUTOCOMPLETE interaction (type 4) and wait for the choices reply.
@@ -525,7 +565,9 @@ async function run() {
   /* 1. the bot registers its commands */
   const registered = await waitFor(() => fake.commands, 10000, 'command registration');
   const names = (registered || []).map((c) => c.name).sort();
-  check(JSON.stringify(names) === JSON.stringify(['arcade', 'changelog', 'help', 'ideas', 'leaderboard', 'link', 'profile', 'suggest', 'vote']), 'the bot registers all nine commands', names.join(', '));
+  check(JSON.stringify(names) === JSON.stringify(['arcade', 'changelog', 'help', 'ideas', 'leaderboard', 'link', 'play', 'profile', 'suggest', 'vote']), 'the bot registers all ten commands', names.join(', '));
+  const playDef = (registered || []).find((c) => c.name === 'play');
+  check(!!playDef && !playDef.options?.length, '/play is registered and takes no options', JSON.stringify(playDef));
   const helpDef = (registered || []).find((c) => c.name === 'help');
   check(!!helpDef && !helpDef.options?.length, '/help is registered and takes no options', JSON.stringify(helpDef));
   const changelogDef = (registered || []).find((c) => c.name === 'changelog');
@@ -541,6 +583,28 @@ async function run() {
   const gameOption = leaderboardDef?.options?.find((o) => o.name === 'game');
   check(gameOption?.autocomplete === true && gameOption.choices === undefined,
     '/leaderboard game: asks Discord for autocomplete instead of fixed choices', JSON.stringify(gameOption));
+
+  /* 1a. /play opens the Activity: callback type 12, not a deferred message. */
+  const launchUser = { id: '920000000000000777', username: 'launcher' };
+  const launched = await pushLaunch(launchUser);
+  check(launched.callback?.type === 12, '/play answers with LAUNCH_ACTIVITY (type 12)', JSON.stringify(launched.callback));
+  check(!launched.callback?.data, '/play neither defers nor attaches a message body', JSON.stringify(launched.callback?.data));
+
+  fake.launchError = 'Activities are not enabled for this application.';
+  const refused = await pushLaunch(launchUser);
+  const refusalText = refused.refusal?.body?.content || '';
+  check(!!refused.refusal, 'a refused launch still answers in the channel');
+  check(/Developer Portal/.test(refusalText) && /Enable Activities/.test(refusalText),
+    'the refusal names the Developer Portal switch that fixes it', refusalText);
+  check(/play in a browser/.test(refusalText), 'the refusal offers the browser fallback', refusalText);
+  fake.launchError = null;
+
+  // A message cannot open an Activity, so the text form points at /play.
+  fake.channelMessages.length = 0;
+  pushMessage(launchUser, '!memearcade play', 'msg-play-text');
+  const textPlay = await waitForChannelMessage((m) => /Activities open from a slash command/.test(m.body?.content || ''), 'the text-form /play explanation');
+  check(!!textPlay, '!memearcade play explains that only the slash command can launch it');
+
   // The text fallback needs message events and, for text in servers, the
   // privileged Message Content bit - so the bot has to ask for both.
   check(fake.intents[0] === FULL_INTENTS,

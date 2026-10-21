@@ -1539,6 +1539,14 @@ async function main() {
   await until(`!document.querySelector('#app').classList.contains('hidden')`, 'the signed-in app shell', 25000);
   check(true, 'the client boots signed in from a restored session');
 
+  // The Discord Activity page, opened outside Discord, must explain how to
+  // launch it rather than hang on an SDK handshake that can never complete.
+  await cdp.send('Page.navigate', { url: `${BASE}/activity` }, session);
+  await until(`(document.querySelector('#boot-status')?.textContent || '').includes('Memes Arcade in Discord')`, 'the Activity explainer', 15000);
+  check(true, '/activity explains how to launch the Activity outside Discord');
+  await cdp.send('Page.navigate', { url: `${BASE}/` }, session);
+  await until(`!document.querySelector('#app').classList.contains('hidden')`, 'the app after the Activity page', 25000);
+
   await runRegressionChecks();
 
   // Hand the browser back to the playing guest for the realtime scenario.

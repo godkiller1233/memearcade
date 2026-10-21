@@ -11,7 +11,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { config, ensureDirs, log, dataIsEphemeral } from './config.js';
+import { config, ensureDirs, log, dataIsEphemeral, ROOT } from './config.js';
 import { db } from './lib/db.js';
 import { createApp } from './lib/http.js';
 import { createUser, getUserByName, setPassword, audit } from './store.js';
@@ -39,6 +39,10 @@ async function main() {
     mounts: [
       { prefix: '/', dir: config.webDir },
       { prefix: '/docs', dir: path.join(config.dataDir, '..', 'docs') },
+      // The Discord Embedded App SDK, served from the installed package. The
+      // Activity page imports it as a module; Discord's proxy only reaches our
+      // own origin, so a CDN import would need a second URL mapping.
+      { prefix: '/vendor/discord-sdk', dir: path.join(ROOT, 'node_modules', '@discord', 'embedded-app-sdk', 'output') },
     ],
     meta: { cors: config.cors, corsOrigins: config.corsOrigins },
   });

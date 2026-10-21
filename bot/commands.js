@@ -35,6 +35,13 @@ const CATEGORY_CHOICES = [
 
 export const COMMAND_DEFINITIONS = [
   {
+    // The answer is interaction callback type 12 (LAUNCH_ACTIVITY), not a text
+    // reply: Discord opens the arcade's Activity in the channel for everyone.
+    // bot/index.js answers this one before the usual deferral - see there.
+    name: 'play',
+    description: 'Play Memes Arcade together, right inside Discord',
+  },
+  {
     name: 'arcade',
     description: 'Your linked stats, or any player by name',
     options: [
@@ -541,6 +548,18 @@ export async function runCommand(name, rawOptions, ctx) {
   }
 
   if (name === 'help') return { content: commandHelp(), ephemeral: false };
+
+  // The text fallback cannot launch an Activity (Discord only opens one from an
+  // interaction), so it points at the two ways that can.
+  if (name === 'play') {
+    return {
+      content: [
+        '🎮 **Activities open from a slash command** - type `/play` in a channel and Discord will open the arcade right there.',
+        ctx.activityUrl ? `No slash commands? Open the arcade in a browser: ${ctx.activityUrl}` : null,
+      ].filter(Boolean).join('\n'),
+      ephemeral: false,
+    };
+  }
 
   if (name === 'ideas') {
     const sort = options.sort === 'new' ? 'new' : 'top';

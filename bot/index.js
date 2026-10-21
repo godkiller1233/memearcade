@@ -183,6 +183,9 @@ async function main() {
   }
 
   const links = new LinkStore(arcade);
+  // The site's root is the Activity entry point (Discord's proxy serves it from
+  // the `/` mapping), so this is also the browser fallback in messages.
+  const activityUrl = (clean(process.env.MEMES_ACTIVITY_URL) || config.arcadeUrl).replace(/\/$/, '');
 
   // The console's server list: reported at boot, then kept fresh. Only this
   // process holds the Discord token, so this is the arcade's only way to know.
@@ -207,11 +210,39 @@ async function main() {
       .catch((err) => log(`/${name} autocomplete reply failed: ${err.message}`));
   }
 
+  /**
+   * /play: callback type 12 asks Discord to open this app's Activity in the
+   * channel. It cannot be deferred - a deferred reply is already an answer -
+   * so this runs before the usual type 5. If Discord refuses (Activities not
+   * enabled on the app, or a channel they cannot open in), the player gets a
+   * plain message with the link instead of silence.
+   */
+  async function launchActivity(interaction, user) {
+    try {
+      await rest.interactionCallback(interaction.id, interaction.token, { type: 12 });
+      log(`/play by ${user.username || 'someone'} - opened the Activity`);
+    } catch (err) {
+      log(`/play could not open the Activity: ${err.message}`);
+      const channelId = interaction.channel_id || interaction.channel?.id;
+      if (!channelId) return;
+      const content = [
+        `⚠️ Discord would not open the Activity: ${err.message}`,
+        'An admin can fix this in the Developer Portal: **Activities → Settings → Enable Activities**, and a URL mapping for `/` pointing at the arcade.',
+        `You can still play in a browser: ${activityUrl}`,
+      ].join('\n');
+      await rest
+        .createMessage(channelId, { content: content.slice(0, 1990), allowed_mentions: { parse: [] } })
+        .catch((postErr) => log(`/play fallback message failed: ${postErr.message}`));
+    }
+  }
+
   async function handleInteraction(interaction) {
     if (interaction.type === 4) return handleAutocomplete(interaction); // AUTOCOMPLETE
     if (interaction.type !== 2) return; // APPLICATION_COMMAND only
     const name = interaction.data?.name || 'unknown';
     const user = interaction.member?.user || interaction.user || {};
+    // /play answers with the launch callback itself, never a deferred reply.
+    if (name === 'play') return launchActivity(interaction, user);
     // /ideas, /changelog and /leaderboard are public; the rest reply privately.
     const ephemeral = !PUBLIC_COMMANDS.has(name);
     try {
@@ -220,7 +251,7 @@ async function main() {
         type: 5,
         data: ephemeral ? { flags: 64 } : undefined,
       });
-      const reply = await runCommand(name, interaction.data?.options || [], { arcade, links, user, features, log });
+      const reply = await runCommand(name, interaction.data?.options || [], { arcade, links, user, features, log, activityUrl });
       const payload = {
         content: String(reply.content || '').slice(0, 1990),
         allowed_mentions: { parse: [] },
@@ -300,7 +331,7 @@ async function main() {
         return;
       }
 
-      const reply = await runCommand(parsed.name, parsed.options, { arcade, links, user, features, log });
+      const reply = await runCommand(parsed.name, parsed.options, { arcade, links, user, features, log, activityUrl });
       const payload = messagePayload(textFallbackHints(reply.content), reply.embeds, reply.ephemeral ? {} : { message_reference: reference(message) });
       if (reply.ephemeral) await sendPrivate(user, payload, channelId, message);
       else await rest.createMessage(channelId, payload);

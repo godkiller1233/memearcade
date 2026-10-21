@@ -77,6 +77,7 @@ import {
   scheduleActive,
 } from '../shared/features.js';
 import { publicConfig, catalogFor as catalogForAccount } from './lib/public-config.js';
+import { activitySettings, exchangeActivityCode, fetchActivityUser } from './lib/discord-activity.js';
 import { onlineCount } from './lib/presence.js';
 import { metaPayload, negotiate, APP_NAME, APP_VERSION, API_VERSION, MIN_CLIENT_VERSION } from '../shared/version.js';
 import { buildStamp } from './lib/build.js';
@@ -229,6 +230,37 @@ function rememberBotGuilds(reported, { at, total }) {
       .slice(0, rows.length - BOT_GUILD_MEMORY_MAX)
       .forEach((row) => delete memory[row.id]);
   }
+}
+
+/**
+ * The arcade account an Activity sign-in gets. A Discord display name is the
+ * nicest starting point but it is not a valid arcade name (spaces are fine,
+ * emoji and punctuation are not), so it is reduced to the allowed set, and a
+ * taken name politely gets a number. The account has a random password: the
+ * Discord id is its real key, and /link can attach it to a proper account.
+ */
+function createActivityAccount(identity) {
+  const raw = String(identity.globalName || identity.username || '')
+    .normalize('NFKC')
+    .replace(/[^A-Za-z0-9_.\- ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  // A Discord name still has to be a legal arcade name: validating here also
+  // keeps a Discord user called "admin" (or another reserved word) from taking
+  // a staff-looking handle.
+  const wanted = raw.slice(0, 20).trim();
+  const fallback = `Player ${String(identity.id).slice(-4)}`;
+  const base = validateUsername(wanted).ok ? wanted : fallback;
+  const taken = (value) => !validateUsername(value).ok || !!getUserByName(value);
+  let name = base;
+  for (let n = 2; n < 60 && taken(name); n++) {
+    const suffix = ` ${n}`;
+    name = `${base.slice(0, 20 - suffix.length).trim()}${suffix}`;
+  }
+  const user = createUser({ name, password: newId(32), kind: 'human', bio: 'Playing from Discord.' });
+  user.discord = { id: identity.id, username: identity.username };
+  db.touch();
+  return user;
 }
 
 /**
@@ -1311,6 +1343,70 @@ export function registerApi(app, { rooms, hub, bot = null }) {
    * show where the bot has been. `total` is how many servers Discord listed -
    * when the report is a capped slice, the servers outside it have not left.
    */
+  /**
+   * Discord Activity: finish the OAuth2 sign-in. The Embedded App SDK hands the
+   * page a one-time code; only this server holds the client secret, so the
+   * exchange happens here and the browser only ever receives an access token it
+   * immediately hands back to the SDK. No session is created yet.
+   */
+  app.post('/api/discord/activity/token', async (ctx) => {
+    // Every player arrives through Discord's proxy, so a per-IP limit is shared
+    // by the whole Activity; the real gate is that Discord must accept the code
+    // and (below) the access token. Keep the ceiling well above a busy channel.
+    authRate(ctx, 'activity-token', 120, 60000);
+    const { accessToken } = await exchangeActivityCode(ctx.body?.code);
+    return { ok: true, access_token: accessToken };
+  });
+
+  /**
+   * Discord Activity: turn a Discord sign-in into an arcade session. The
+   * access token is checked against Discord itself - it is the proof of who
+   * the player is - and the first visit quietly creates an arcade account tied
+   * to that Discord id. A player who already linked an account (with /link)
+   * keeps using it, so Activity progress is their real profile's progress.
+   */
+  app.post('/api/discord/activity/session', async (ctx) => {
+    authRate(ctx, 'activity-session', 240, 60000);
+    const identity = await fetchActivityUser(ctx.body?.access_token);
+    const instanceId = String(ctx.body?.instanceId || '').slice(0, 128) || null;
+    const link = db.data.botLinks?.[identity.id];
+    let user = link?.userId ? getUser(link.userId) : null;
+    let created = false;
+    if (!user) {
+      user = createActivityAccount(identity);
+      created = true;
+    }
+    // Refresh the link on every sign-in: it is what makes the next visit (and
+    // the bot's player-bound commands) resolve to this same account.
+    db.data.botLinks[identity.id] = {
+      ...(db.data.botLinks[identity.id] || {}),
+      userId: user.id,
+      discordId: identity.id,
+      at: now(),
+      name: identity.globalName || identity.username || null,
+      via: 'activity',
+    };
+    // Only a new account is audit-worthy; a sign-in happens every time someone
+    // opens the Activity and would bury the moderation log.
+    if (created) {
+      audit(user, 'discord.activity.account', user.id, {
+        discordId: identity.id,
+        ...(instanceId ? { instanceId } : {}),
+      });
+    }
+    db.touch();
+    const token = createSession(user.id, { kind: 'web', ip: clientIp(ctx.req), ttlDays: 30 });
+    return {
+      ok: true,
+      token,
+      user: userPublic(user, { self: true }),
+      created,
+      linked: !created,
+      discord: { id: identity.id, username: identity.username, name: identity.globalName || identity.username },
+      instanceId,
+    };
+  });
+
   app.post('/api/bot/guilds', (ctx) => {
     requireBot(ctx);
     const seen = new Set();
@@ -1372,6 +1468,7 @@ export function registerApi(app, { rooms, hub, bot = null }) {
       stale: age === null || age > BOT_PRESENCE_STALE_MS,
       bot: presence ? { id: presence.appId, username: presence.username } : null,
       inviteUrl: appId ? botInviteUrl(appId) : null,
+      activity: activitySettings(),
       guilds,
       left,
     };

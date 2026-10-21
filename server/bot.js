@@ -170,6 +170,9 @@ export function startBot({ port, secret, host = config.host, log = () => {}, env
     // secret may have been rotated and the port is only known now.
     ARCADE_URL: url,
     ARCADE_BOT_SECRET: secret,
+    // What /play says when it cannot open the Activity: the browser fallback
+    // must be the public site, not the loopback URL the bot talks to.
+    MEMES_ACTIVITY_URL: config.publicUrl || '',
     // If this process is killed without a chance to stop it (SIGKILL, a crash,
     // node --watch), the bot notices and exits instead of staying online as a
     // duplicate answering every command twice.

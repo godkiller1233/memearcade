@@ -18,6 +18,7 @@ import { roomAlertText, hostStreamText } from './netcode.js';
 import { unlockAudio, toggleMusic, sfx, currentTrack } from './audio.js';
 import { loadEngine } from '../games/engines/registry-loader.js';
 import { watchBuilds } from './build-watch.js';
+import { ACTIVITY_PAGE, ACTIVITY_FRAME, activityMode, bootActivity, mountActivityBar, startActivitySync, activityWelcome } from './activity.js';
 
 /* ------------------------------------------------------------------ *
  * boot
@@ -28,8 +29,9 @@ async function boot() {
   applyTheme();
   const status = $('#boot-status');
   const detail = $('#boot-detail');
+  let meta = null;
   try {
-    const meta = await fetchMeta();
+    meta = await fetchMeta();
     status.textContent = `${meta.app} v${meta.appVersion} · API v${meta.apiVersion}`;
     detail.textContent = `${meta.counts?.playable ?? 0} games playable · ${meta.counts?.registered ?? 0} accounts · ${meta.counts?.online ?? 0} online`;
     state.catalog = meta.catalog || [];
@@ -54,6 +56,21 @@ async function boot() {
       btn(upgrade ? 'Reload client' : 'Retry', () => location.reload(), { variant: 'primary' }),
       btn('Open API status', () => window.open('/api/meta', '_blank'), { cls: 'sm' }),
     );
+    return;
+  }
+
+  // Inside Discord there is no account screen: the Activity signs in through
+  // Discord and joins its instance room. It paints its own reason and stops if
+  // that cannot work (no credentials, not really in Discord, SDK unreachable).
+  if (ACTIVITY_PAGE || ACTIVITY_FRAME) {
+    const started = await bootActivity(meta);
+    if (!started) return;
+    $('#boot').classList.add('hidden');
+    startApp();
+    mountActivityBar();
+    setView('activity');
+    startActivitySync();
+    activityWelcome();
     return;
   }
 
@@ -475,7 +492,7 @@ views.play = (mount) => {
         el('h2', { text: title.name || title.gameId || 'Game' }),
         local?.mode === 'local' ? pill('hot-seat') : local?.mode === 'solo' ? pill('vs bots') : null,
         room ? pill(room.status, inLobby ? '' : 'good') : null,
-        room ? pill(`code ${room.code}`, 'good') : null,
+        room ? (activityMode() ? pill('Discord room', 'good') : pill(`code ${room.code}`, 'good')) : null,
       ),
       el('div', { class: 'row' },
         inLobby && isHost ? btn(room.canStart ? 'Start game' : 'Waiting for players', () => startRoom(), { variant: 'primary', disabled: !room.canStart, cls: 'sm' }) : null,
@@ -518,10 +535,12 @@ views.play = (mount) => {
   if (room && !inLobby) mountOnlineStage(stage);
   else if (room) {
     stage.appendChild(el('div', { class: 'col' },
-      el('p', { class: 'muted', text: isHost
-        ? 'The room starts on its own once it is ready - or hit Start game to begin now.'
-        : 'Waiting for the host to start the game.' }),
-      el('p', { class: 'muted small', text: 'Everyone on your wifi can join with the code above (or the LAN link the server prints at boot).' }),
+        el('p', { class: 'muted', text: isHost
+          ? 'The room starts on its own once it is ready - or hit Start game to begin now.'
+          : 'Waiting for the host to start the game.' }),
+        el('p', { class: 'muted small', text: activityMode()
+          ? 'Everyone who opens this Activity is already in this room. Add a bot if a seat is empty, then start when ready.'
+          : 'Everyone on your wifi can join with the code above (or the LAN link the server prints at boot).' }),
       // The same rules the play sheet advertised for this room, so nobody is
       // surprised by the loadout once the match starts.
       el('div', { class: 'row' }, pill('rules'), roomRulesLine(room)),
@@ -545,10 +564,13 @@ views.play = (mount) => {
 function waitingRoomCard(room, isHost) {
   const min = Number(room.game?.players?.min) || 2;
   const missing = Math.max(0, min - (room.players?.length || 0));
+  // In an Activity the room fills by people opening it, not by a code or a
+  // friend invitation from the website: the useful action is a bot.
+  const fill = activityMode() ? 'add a bot' : 'add a bot or invite a friend';
   const nudge = room.autoStartAt
-    ? 'The match starts on its own - add a bot or invite a friend before it does.'
+    ? `The match starts on its own - ${fill} before it does.`
     : missing > 0
-      ? `${missing} more player${missing === 1 ? '' : 's'} needed - add a bot or invite a friend to get going.`
+      ? `${missing} more player${missing === 1 ? '' : 's'} needed - ${fill} to get going.`
       : 'Ready when you are.';
   return el('div', { class: 'card room-waiting', id: 'room-waiting' },
     el('div', { class: 'room-countdown', id: 'room-countdown', hidden: !room.autoStartAt },
@@ -563,8 +585,8 @@ function waitingRoomCard(room, isHost) {
     el('p', { class: 'muted', text: nudge }),
     el('div', { class: 'row' }, pill('rules'), roomRulesLine(room)),
     el('div', { class: 'row' },
-      btn('➕ Invite a friend', () => inviteFriendDialog(room), { variant: 'primary' }),
-      isHost && featureOn('bots') ? btn('🤖 Add bot', () => addBot(2), { cls: 'sm' }) : null),
+      activityMode() ? null : btn('➕ Invite a friend', () => inviteFriendDialog(room), { variant: 'primary' }),
+      isHost && featureOn('bots') ? btn('🤖 Add bot', () => addBot(2), { cls: 'sm', variant: activityMode() ? 'primary' : '' }) : null),
   );
 }
 
@@ -690,7 +712,9 @@ function exitGame() {
   activeHost = null;
   state.localGame = null;
   leaveCurrentRoom();
-  setView('home');
+  // In an Activity "home" is the game picker: the website's home view is a
+  // different product, and the room belongs to the Activity instance.
+  setView(activityMode() ? 'activity' : 'home');
 }
 
 function roomChatCard() {
@@ -1080,8 +1104,10 @@ rt.on('room:closed', (msg) => {
   onlineHost = null;
   syncRoomAlert();
   if (state.view === 'play') {
-    toast('The room closed.', 'warn');
-    setView('home');
+    // A host switching games closes the old room on purpose; the new one is
+    // already on its way, so "the room closed" would be a lie in that moment.
+    if (msg.reason !== 'game-changed') toast(activityMode() ? 'The room closed - pick another game.' : 'The room closed.', 'warn');
+    setView(activityMode() ? 'activity' : 'home');
   }
   notify();
 });

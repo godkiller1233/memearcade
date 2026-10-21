@@ -1090,8 +1090,38 @@ function drawBot(draw, fail) {
         el('p', { class: 'muted small', text: 'On a hosted server set MEMES_BOT_SECRET instead so redeploys keep the same token.' }),
       ),
       botServersCard(presence, health),
+      presence ? botActivityCard(presence.activity) : null,
     ]);
   }).catch(fail);
+}
+
+/**
+ * Activities: the games that run inside Discord itself. The panel cannot flip
+ * the Developer Portal switches, so this card says exactly which ones to flip
+ * and shows the URL to paste - the two things that are easy to get wrong.
+ */
+function botActivityCard(activity) {
+  const enabled = !!activity?.enabled;
+  return el('div', { class: 'card' },
+    el('div', { class: 'row spread' },
+      el('div', { class: 'row' },
+        el('h3', { text: '🎮 Activities' }),
+        pill(enabled ? 'ready' : 'not configured', enabled ? 'good' : 'warn')),
+      el('code', { class: 'mono small', text: '/play' })),
+    el('p', { class: 'muted small', text: 'Players run /play in a channel and Discord opens the arcade in an Activity right there - everyone in it shares the same room automatically, no code to read out.' }),
+    enabled
+      ? el('div', { class: 'col' },
+          el('p', { class: 'muted small', text: 'Developer Portal → Activities → Settings: tick "Enable Activities". Under URL Mappings add a mapping whose prefix is / and whose target is this host (no https://). Discord then serves the arcade\'s own root page as the Activity - it notices the Discord frame and becomes the game picker.' }),
+          el('div', { class: 'row' },
+            el('code', { class: 'mono small', text: activity?.target || 'set MEMES_PUBLIC_URL (or open the deployed URL) so this is absolute' }),
+            activity?.target ? btn('Copy target', () => navigator.clipboard?.writeText(activity.target).then(() => toast('Copied', 'good'), () => toast(activity.target)), { cls: 'sm' }) : null,
+            activity?.url ? el('a', { class: 'btn sm', href: activity.url, target: '_blank', rel: 'noopener noreferrer', text: 'Open the site' }) : null),
+          el('p', { class: 'muted small', text: 'Under OAuth2 → Redirects, add https://127.0.0.1 as the placeholder - the Discord SDK handles the return trip. The client secret stays in this service\'s environment; it is never sent to a browser.' }))
+      : el('div', { class: 'col' },
+          el('p', { class: 'muted', text: `Not ready: set ${activity?.missing?.join(' and ') || 'DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET'} in this service\'s environment, then redeploy.` }),
+          el('p', { class: 'muted small', text: 'Both come from Developer Portal → OAuth2. DISCORD_CLIENT_ID is the public Application ID; DISCORD_CLIENT_SECRET is the private one and only this server needs it. Once set, enable Activities and add the URL mapping above.' })),
+    el('p', { class: 'muted small', text: 'Unverified Activities are limited to the app\'s team and servers under 25 members; Discord verification is what opens one to the public.' }),
+  );
 }
 
 /**

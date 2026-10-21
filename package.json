@@ -29,6 +29,7 @@
     "verify": "node tools/check.mjs && node tools/db-check.mjs && node tools/blueprint-check.mjs && node tools/notify-check.mjs && node tools/test-engines.mjs && node tools/realtime-check.mjs && node tools/browser-reload-check.mjs && node tools/bot-check.mjs && node tools/desktop-check.mjs && node tools/perm-check.mjs && node tools/leak-check.mjs"
   },
   "dependencies": {
+    "@discord/embedded-app-sdk": "^2.5.0",
     "pg": "^8.23.1"
   },
   "keywords": [
