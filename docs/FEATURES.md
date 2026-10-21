@@ -212,7 +212,10 @@ does in a browser. The Activity room for a Discord instance is a normal room
 (marked private so it stays out of the public server list), and a feature the
 owner switched off refuses it on the same socket path as the website. A player
 who already linked an account with `/link` keeps that account's profile; a first
-visit creates one tied to the Discord id.
+visit creates one tied to the Discord id. Someone who opens the Activity while a
+round is already running - or into a full room - is queued for the next round
+rather than seated as a spectator: the round in progress is never reshuffled,
+and the next start seats everyone waiting, up to the room's capacity.
 
 ## Storage and enforcement
 

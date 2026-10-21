@@ -41,6 +41,8 @@ export function activityMode() {
 
 let activity = null;
 let pollTimer = null;
+/** True while this player is held for the next round instead of playing. */
+let waitingNextRound = false;
 
 /* ------------------------------------------------------------------ *
  * boot
@@ -208,6 +210,18 @@ rt.on('room:instance', (msg) => {
   if (!msg?.room && state.view !== 'activity') showView('activity');
 });
 
+// A player held for the next round is seated by the server at the start of
+// it; the first `game` message without `waiting` is that moment, and it should
+// not look like the board simply appeared.
+rt.on('game', (msg) => {
+  if (!activity) return;
+  const wasWaiting = waitingNextRound;
+  waitingNextRound = !!msg?.waiting;
+  if (wasWaiting && !waitingNextRound && msg?.room?.players?.some((p) => p.id === state.me?.id)) {
+    toast('Your seat is ready - the next round is starting.', 'good', 4000);
+  }
+});
+
 /* ------------------------------------------------------------------ *
  * the picker
  * ------------------------------------------------------------------ */
@@ -216,6 +230,34 @@ views.activity = (mount) => {
   const room = state.room;
   const mine = room && room.host === state.me?.id;
   const games = (state.catalog || []).filter((game) => game.playable);
+
+  // The round was already running when this player opened the Activity: they
+  // are queued for the next one.  Say so plainly instead of dropping them into
+  // a spectator view of a match they cannot influence.
+  const queue = room?.waiting || [];
+  const place = queue.findIndex((w) => w.id === state.me?.id);
+  if (room && place >= 0) {
+    const live = room.status === 'playing';
+    mount.appendChild(el('div', { class: 'card activity-waiting' },
+      el('div', { class: 'row spread' },
+        el('div', { class: 'row' },
+          el('span', { class: 'icon', text: room.game?.icon || '🎮' }),
+          el('h2', { text: room.game?.name || 'Game' }),
+          pill('next round')),
+        pill(`#${place + 1} in line`)),
+      el('p', { text: live
+        ? `A round is already running with ${room.players?.length || 0} players, so you are waiting for the next one.`
+        : 'Every seat is taken right now, so you are waiting for the next one.' }),
+      el('p', { class: 'muted', text: 'Nothing to do: the host starting the next round puts you in a seat automatically.' }),
+      queue.length > 1
+        ? el('p', { class: 'muted small', text: `Also waiting: ${queue.filter((w) => w.id !== state.me?.id).map((w) => w.name).join(', ')}.` })
+        : null,
+      el('p', { class: 'muted small', text: activityMode()
+        ? 'You can leave this Activity open - Discord keeps it here next to the channel.'
+        : 'Leave this page open; the next round picks you up.' }),
+    ));
+    return;
+  }
 
   // Already in a game: offer the way back, and only the host may replace it.
   if (room && !mine) {
@@ -272,8 +314,12 @@ export function mountActivityBar() {
     // Changing the game closes the room, so it is a lobby action only - not a
     // button that could end a match by accident.
     const mine = room && room.host === state.me?.id && room.status !== 'playing';
+    const queued = !!(room?.waiting || []).some((w) => w.id === state.me?.id);
+    const waiting = room?.waiting?.length || 0;
     const text = room
-      ? `${room.game?.icon || '🎮'} ${room.game?.name || 'Game'} · ${room.players?.length || 0} in the room${room.status === 'playing' ? ' · live' : ''}`
+      ? queued
+        ? `⏳ ${room.game?.name || 'Game'} · waiting for the next round`
+        : `${room.game?.icon || '🎮'} ${room.game?.name || 'Game'} · ${room.players?.length || 0} in the room${room.status === 'playing' ? ' · live' : ''}${waiting ? ` · ${waiting} waiting` : ''}`
       : '🕹️ Memes Arcade · no game yet';
     const key = `${text}|${mine}|${room ? 'r' : 'n'}`;
     if (key === last) return;

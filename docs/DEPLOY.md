@@ -261,6 +261,11 @@ Notes:
 - **Sessions are ordinary arcade sessions.** The first visit quietly creates an
   arcade account tied to the Discord id; a player who already ran `/link` keeps
   using that account, so Activity play counts on their real profile.
+- **Late arrivals wait for the next round.** Opening the Activity mid-match (or
+  into a full room) does not turn a player into a spectator: the running round
+  cannot take another seat, so they are queued - visible on the room - and
+  seated automatically when the host starts the next round. The queue lives on
+  the room, so it empties when the host switches games or the room closes.
 
 ### The bot is not online: ask /api/health first
 

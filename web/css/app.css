@@ -976,6 +976,12 @@ body.activity-mode .view {
   text-overflow: ellipsis;
 }
 
+/* A player held for the next round: the card is the whole view, so it should
+   not read as one more thing above the board. */
+.activity-waiting {
+  border-color: var(--accent);
+}
+
 .activity-games {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));

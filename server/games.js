@@ -161,6 +161,11 @@ export class GameRooms {
       options,
       players: [],
       spectators: [],
+      // Players who arrived while a round was running (a Discord Activity has
+      // no join code to wait on, so anyone can turn up mid-match).  They are
+      // held here and seated by start(), instead of spending the round as a
+      // spectator they never asked to be.
+      waiting: [],
       state: null,
       status: 'lobby',
       seed: seed ?? Math.floor(Math.random() * 1e9),
@@ -217,7 +222,8 @@ export class GameRooms {
     };
     room.players.push(seat);
     if (!room.host) room.host = seat.id;
-    if (room.status === 'playing') this.syncState(room);
+    // touch() below broadcasts every member their own filtered view, so a seat
+    // added mid-match is delivered without a separate sync step.
     this.touch(room);
     return seat;
   }
@@ -260,6 +266,12 @@ export class GameRooms {
     if (room.players.filter((p) => p.kind === 'human').length === 0) {
       this.close(room, 'empty');
       return { removed: true, closed: true };
+    }
+    // A seat opened while no round is running: someone waiting takes it now.
+    // Mid-match the queue keeps waiting - the running round is not reshuffled.
+    if (room.status !== 'playing' && room.waiting.length) {
+      const tookASeat = this.seatWaiting(room);
+      if (tookASeat.length) this.systemMessage(room, `⏭️ ${tookASeat.join(', ')} took the open ${tookASeat.length === 1 ? 'seat' : 'seats'}.`);
     }
     if (room.status === 'playing' && room.engine.onLeave) {
       try {
@@ -382,6 +394,59 @@ export class GameRooms {
     return true;
   }
 
+  /**
+   * A player who turned up while the round was already running waits here for
+   * the next one.  This is deliberately not a spectator seat: they asked to
+   * play, and the next start() hands them one.  The room is told, so nobody
+   * wonders why the roster shows a name that is not in the match.
+   */
+  addWaiting(room, user) {
+    if (room.players.some((p) => p.id === user.id)) return false;
+    if (room.waiting.some((w) => w.id === user.id)) return false;
+    room.waiting.push({ id: user.id, name: user.name, avatar: user.avatar || '⏳', at: now() });
+    this.systemMessage(room, `⏳ ${user.name} will join the next round.`);
+    this.touch(room);
+    return true;
+  }
+
+  removeWaiting(room, userId) {
+    const before = room.waiting.length;
+    room.waiting = room.waiting.filter((w) => w.id !== userId);
+    return room.waiting.length !== before;
+  }
+
+  /**
+   * Seat everyone who has been waiting, up to the room's capacity.  Called
+   * when a round starts (the wait is over) and when a seat opens between
+   * rounds.  Anyone still left over stays at the front of the queue, so a
+   * crowded Activity never drops a player silently.
+   */
+  seatWaiting(room) {
+    const max = room.engine.meta.players.max + (room.engine.meta.maxBots || 0);
+    const seated = [];
+    while (room.waiting.length && room.players.length < max) {
+      // Leave the queue before taking the seat, so no broadcast ever shows the
+      // same player as both waiting and seated.
+      const next = room.waiting.shift();
+      try {
+        this.addPlayer(room, next);
+        seated.push(next.name);
+      } catch (err) {
+        // addPlayer can fail after writing the seat (a game that refuses a mid-
+        // round seat, say).  Trust the roster over the exception: a player who
+        // is in it has been seated, and only a real failure goes back in line.
+        if (room.players.some((p) => p.id === next.id)) {
+          seated.push(next.name);
+          continue;
+        }
+        room.waiting.unshift(next);
+        log('games: could not seat a waiting player:', err.message);
+        break;
+      }
+    }
+    return seated;
+  }
+
   /* ---------------- start / finish ---------------- */
 
   canStart(room) {
@@ -391,6 +456,9 @@ export class GameRooms {
 
   start(room) {
     const meta = room.engine.meta;
+    // The previous round is over: whoever was held for this one takes a seat
+    // before the world is built, so they start with everyone else.
+    const joinedLate = this.seatWaiting(room);
     if (!this.canStart(room)) {
       throw new Error(`Needs ${meta.players.min}-${meta.players.max} players (currently ${room.players.length}).`);
     }
@@ -416,6 +484,12 @@ export class GameRooms {
     room.streamWarned = false;
     room.streamWarnedAt = 0;
     room.deadline = meta.turnMs ? now() + meta.turnMs : 0;
+    if (joinedLate.length) {
+      this.systemMessage(room, `⏭️ ${joinedLate.join(', ')} joined from the waiting list.`);
+    }
+    if (room.waiting.length) {
+      this.systemMessage(room, `⏳ ${room.waiting.map((w) => w.name).join(', ')} ${room.waiting.length === 1 ? 'is' : 'are'} still waiting for a seat.`);
+    }
     this.systemMessage(room, `Game started: ${meta.name}`);
     // Realtime rooms are host-authoritative: the host needs the pristine
     // engine state, not just its filtered view, before it starts ticking.
@@ -751,6 +825,9 @@ export class GameRooms {
       hostOutage: this.hostOutage(room),
       hostStream: this.hostStreamInfo(room),
       spectators: room.spectators.length,
+      // Names only: the client needs ids to recognise itself and the count to
+      // say "2 waiting"; nobody needs their activity times.
+      waiting: room.waiting.map((w) => ({ id: w.id, name: w.name })),
       options: room.options,
       createdAt: room.createdAt,
       updatedAt: room.updatedAt,
@@ -808,6 +885,17 @@ export class GameRooms {
         spectating: true,
       });
     }
+    // Waiting players see the room (and the roster) but render the waiting
+    // card rather than the board the round is running on.
+    for (const queued of room.waiting) {
+      this.hub.sendToUser(queued.id, {
+        t: 'game',
+        room: this.roomInfo(room),
+        view: this.view(room, `spectator:${queued.id}`),
+        messages: room.messages.slice(-40),
+        waiting: true,
+      });
+    }
     this.hub.broadcastLobby();
   }
 
@@ -816,6 +904,7 @@ export class GameRooms {
     const recipients = [
       ...room.players.filter((p) => p.kind === 'human' && !except.includes(p.id)).map((p) => p.id),
       ...room.spectators.map((s) => s.id),
+      ...room.waiting.map((w) => w.id),
     ];
     if (recipients.length) this.hub.sendToUsers(recipients, { ...message, roomId: room.id });
   }

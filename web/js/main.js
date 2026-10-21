@@ -1056,6 +1056,16 @@ rt.on('game', (msg) => {
   state.room = msg.room;
   state.viewData = msg.view;
   if (msg.messages) state.messages[`room:${msg.room.id}`] = msg.messages;
+  // Held for the next round (a Discord Activity late arrival): the waiting
+  // card is this player's view, not a spectator seat on a match they are not
+  // in.  The server seats them when the next round starts, and that `game`
+  // message - without `waiting` - brings them to the stage.
+  if (msg.waiting) {
+    if (state.view !== 'activity') setView('activity');
+    else renderApp();
+    notify();
+    return;
+  }
   const playing = msg.room?.status === 'playing';
   if (state.view !== 'play') {
     setView('play');

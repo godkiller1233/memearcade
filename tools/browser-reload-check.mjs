@@ -1544,6 +1544,36 @@ async function main() {
   await cdp.send('Page.navigate', { url: `${BASE}/activity` }, session);
   await until(`(document.querySelector('#boot-status')?.textContent || '').includes('Memes Arcade in Discord')`, 'the Activity explainer', 15000);
   check(true, '/activity explains how to launch the Activity outside Discord');
+
+  // A late arrival to an Activity waits for the next round instead of holding a
+  // spectator seat: render that card from the room's waiting list, off-screen,
+  // and put the live state back so nothing downstream sees the stand-in room.
+  const waitingCard = await evaluate(`(async () => {
+    const store = await import('/js/store.js');
+    const mod = await import('/js/views.js');
+    const saved = { me: store.state.me, room: store.state.room, catalog: store.state.catalog };
+    store.state.me = { id: 'waiting-me', name: 'Waiting' };
+    store.state.catalog = [];
+    store.state.room = {
+      id: 'wait-room', status: 'playing', host: 'host-1',
+      game: { name: 'UNO', icon: '\u{1F0CF}', players: { min: 2, max: 10 } },
+      players: [{ id: 'host-1', name: 'Host' }, { id: 'guest-1', name: 'Guest' }],
+      waiting: [{ id: 'waiting-me', name: 'Waiting' }, { id: 'other-1', name: 'Other' }],
+    };
+    const mount = document.createElement('div');
+    mod.views.activity(mount);
+    const text = mount.textContent;
+    const hasBoard = !!mount.querySelector('#game-stage, canvas');
+    store.state.me = saved.me;
+    store.state.room = saved.room;
+    store.state.catalog = saved.catalog;
+    return { text, hasBoard };
+  })()`);
+  check(/waiting for the next one/i.test(waitingCard?.text || '') && /#1 in line/.test(waitingCard?.text || ''),
+    'a late Activity arrival sees the next-round card', String(waitingCard?.text || '').slice(0, 80));
+  check(waitingCard?.hasBoard === false && /Other/.test(waitingCard?.text || ''),
+    'the waiting card shows the rest of the line and no board');
+
   await cdp.send('Page.navigate', { url: `${BASE}/` }, session);
   await until(`!document.querySelector('#app').classList.contains('hidden')`, 'the app after the Activity page', 25000);
 

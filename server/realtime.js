@@ -177,9 +177,11 @@ export class RealtimeHub {
     }
   }
 
-  /** The room a user is in right now - seated or watching. */
+  /** The room a user is in right now - seated, watching, or waiting for the next round. */
   roomOf(userId) {
-    return [...this.rooms.rooms.values()].find((r) => r.players.some((p) => p.id === userId) || r.spectators.some((s) => s.id === userId)) || null;
+    return [...this.rooms.rooms.values()].find((r) => r.players.some((p) => p.id === userId)
+      || r.spectators.some((s) => s.id === userId)
+      || r.waiting.some((w) => w.id === userId)) || null;
   }
 
   /** Drops an offline member from their room; the room notices and rebroadcasts. */
@@ -189,6 +191,7 @@ export class RealtimeHub {
     if (room.players.some((p) => p.id === userId)) {
       this.rooms.removePlayer(room, userId, { reason: 'lost connection' });
     } else {
+      this.rooms.removeWaiting(room, userId);
       room.spectators = room.spectators.filter((s) => s.id !== userId);
       this.rooms.touch(room);
     }
@@ -438,6 +441,7 @@ export class RealtimeHub {
       view: this.rooms.view(room, session.user.id),
       messages: room.messages.slice(-40),
       spectating: room.spectators.some((s) => s.id === session.user.id),
+      waiting: room.waiting.some((w) => w.id === session.user.id),
     });
     // A realtime room lives on its host: after a reconnect (or a reload) the
     // host gets the current world back so it can keep simulating.
@@ -912,11 +916,15 @@ export class RealtimeHub {
         if (current && current.id !== target.id && current.status !== 'closed') this.leaveRoom(session, current);
         const seated = target.players.some((p) => p.id === me.id);
         const watching = target.spectators.some((p) => p.id === me.id);
+        const queued = target.waiting.some((w) => w.id === me.id);
         const fresh = session.roomId !== target.id;
         session.roomId = target.id;
-        if (!seated && !watching) {
+        if (!seated && !watching && !queued) {
           const full = target.players.length >= target.engine.meta.players.max + (target.engine.meta.maxBots || 0);
-          if (target.status === 'playing' || full) this.rooms.addSpectator(target, me);
+          // The round already running cannot take another player, and nobody
+          // asked to watch: hold them for the next one instead of a spectator
+          // seat that would silently outlast the round.
+          if (target.status === 'playing' || full) this.rooms.addWaiting(target, me);
           else this.rooms.addPlayer(target, me);
         } else if (fresh) {
           // A repeat poll while seated is a no-op; a fresh socket (a reconnect)
@@ -1063,7 +1071,10 @@ export class RealtimeHub {
     if (!me) return;
     const seated = room.players.some((p) => p.id === me.id);
     if (seated) this.rooms.removePlayer(room, me.id, { reason: 'left the game' });
-    else room.spectators = room.spectators.filter((s) => s.id !== me.id);
+    else {
+      this.rooms.removeWaiting(room, me.id);
+      room.spectators = room.spectators.filter((s) => s.id !== me.id);
+    }
     session.roomId = null;
     if (this.rooms.getRoom(room.id)) this.rooms.touch(room);
     session.conn.send({ t: 'room:closed', reason: 'left' });

@@ -679,17 +679,54 @@ async function run(engine, OnlineHost) {
   const rejoined = await guestClient.waitFor('game', (m) => m.room?.id === switched?.room?.id && m.room?.players?.length === 2, 3000);
   check(!!rejoined, 'the others follow the host into the new room');
 
+  /* A late arrival to a running round waits for the next one instead of
+   * becoming a spectator for the rest of it.  UNO seats more than two, so the
+   * queue can actually be seated when the round turns over. */
+  const lateAccount = await guest('Latey');
+  const lateClient = new Client('late');
+  await lateClient.connect(lateAccount);
+  check(await lateClient.waitFor('welcome', null, 3000) !== null, 'a late arrival connects to the arcade');
+
+  host.send({ t: 'room', op: 'instance', instanceId, gameId: 'uno' });
+  const unoRoom = await host.waitFor('game', (m) => m.room?.instanceId === instanceId && m.room?.gameId === 'uno', 3000);
+  guestClient.send({ t: 'room', op: 'instance', instanceId });
+  const unoGuest = await guestClient.waitFor('game', (m) => m.room?.id === unoRoom?.room?.id && m.room?.players?.length === 2, 3000);
+  check(!!unoRoom && !!unoGuest, 'the Activity moves to a game with a free seat', unoRoom?.room?.gameId);
+  const unoId = unoRoom?.room?.id;
+
+  host.send({ t: 'room', op: 'start' });
+  const running = await host.waitFor('game', (m) => m.room?.id === unoId && m.room?.status === 'playing', 3000);
+  check(!!running, 'the round starts without the late arrival');
+
+  lateClient.send({ t: 'room', op: 'instance', instanceId });
+  const held = await lateClient.waitFor('game', (m) => m.room?.id === unoId && m.waiting, 3000);
+  check(!!held, 'a late arrival is told they are waiting for the next round');
+  check(held?.room?.waiting?.some((w) => w.id === lateAccount.id) && held?.spectating !== true,
+    'the queue holds them instead of a spectator seat', JSON.stringify(held?.room?.waiting || []));
+  check(held?.room?.players?.length === 2, 'the round already running is not reshuffled', `${held?.room?.players?.length} players`);
+  const hostSeesQueue = await host.waitFor('game', (m) => m.room?.id === unoId && m.room?.waiting?.length === 1, 3000);
+  check(!!hostSeesQueue, 'the room sees who is waiting for the next round', hostSeesQueue?.room?.waiting?.map((w) => w.name).join(', '));
+
+  host.send({ t: 'room', op: 'rematch' });
+  const seatedLate = await lateClient.waitFor('game', (m) => m.room?.id === unoId && m.room?.status === 'playing' && !m.waiting && m.room?.players?.length === 3, 3000);
+  check(!!seatedLate, 'the next round seats the waiting player', seatedLate ? `${seatedLate.room.players.length} players` : 'still queued');
+  check(seatedLate?.room?.waiting?.length === 0, 'the queue is empty once its players are seated', JSON.stringify(seatedLate?.room?.waiting || []));
+  const hostSeesSeat = await host.waitFor('game', (m) => m.room?.id === unoId && m.room?.players?.length === 3 && m.room?.status === 'playing', 3000);
+  check(!!hostSeesSeat, 'the host sees the seat filled for the new round');
+
   host.send({ t: 'room', op: 'instance', instanceId: 'not a valid id!' });
   const invalid = await host.waitFor('error', (m) => /not valid/i.test(m.message || ''), 2000);
   check(!!invalid, 'a malformed Activity instance id is refused', invalid?.message);
 
   host.send({ t: 'room', op: 'leave' });
   guestClient.send({ t: 'room', op: 'leave' });
+  lateClient.send({ t: 'room', op: 'leave' });
   await sleep(300);
-  // The instance section talked in the same two sockets; drop those frames so
+  // The instance section talked in the same three sockets; drop those frames so
   // the next section's waitFor cannot match an older room's update.
   host.messages.length = 0;
   guestClient.messages.length = 0;
+  lateClient.messages.length = 0;
 
   /* 1. room + seats */
   host.send({ t: 'room', op: 'create', gameId: 'pong', visibility: 'public', options: { target: 5 } });
